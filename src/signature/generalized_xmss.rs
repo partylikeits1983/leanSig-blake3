@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use rand::RngExt;
+use rand::{CryptoRng, RngExt};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -225,6 +225,8 @@ pub struct GeneralizedXMSSSecretKey<
     left_bottom_tree_index: u64,
     left_bottom_tree: HashSubTree<TH>,
     right_bottom_tree: HashSubTree<TH>,
+    /// Sorted epochs consumed inside the current prepared window.
+    used_epochs: Vec<u32>,
     _encoding_type: PhantomData<IE>,
 }
 
@@ -253,6 +255,7 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
         let left_bottom_tree_index_size = 8; // u64
         let left_bottom_tree_size = self.left_bottom_tree.ssz_bytes_len();
         let right_bottom_tree_size = self.right_bottom_tree.ssz_bytes_len();
+        let used_epochs_size = self.used_epochs.ssz_bytes_len();
 
         prf_key_size
             + parameter_size
@@ -262,9 +265,11 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
             + left_bottom_tree_index_size
             + offset_size // left_bottom_tree offset
             + offset_size // right_bottom_tree offset
+            + offset_size // used_epochs offset
             + top_tree_size
             + left_bottom_tree_size
             + right_bottom_tree_size
+            + used_epochs_size
     }
 
     fn ssz_append(&self, buf: &mut Vec<u8>) {
@@ -279,19 +284,22 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
         // - Field 6 (left_bottom_tree_index): fixed → write data
         // - Field 7 (left_bottom_tree): variable → write offset
         // - Field 8 (right_bottom_tree): variable → write offset
+        // - Field 9 (used_epochs): variable → write offset
         //
-        // Then write variable data in order: top_tree, left_bottom_tree, right_bottom_tree
+        // Then write variable data in order: top_tree, left_bottom_tree, right_bottom_tree,
+        // used_epochs.
 
         // Calculate sizes of fixed fields
         let prf_key_size = self.prf_key.ssz_bytes_len();
         let parameter_size = self.parameter.ssz_bytes_len();
 
         // Calculate start of variable data
-        let fixed_size = prf_key_size + parameter_size + 8 + 8 + 4 + 8 + 4 + 4;
+        let fixed_size = prf_key_size + parameter_size + 8 + 8 + 4 + 8 + 4 + 4 + 4;
 
         let offset_top_tree = fixed_size;
         let offset_left_bottom = offset_top_tree + self.top_tree.ssz_bytes_len();
         let offset_right_bottom = offset_left_bottom + self.left_bottom_tree.ssz_bytes_len();
+        let offset_used_epochs = offset_right_bottom + self.right_bottom_tree.ssz_bytes_len();
 
         // 1. Encode fixed field: prf_key
         self.prf_key.ssz_append(buf);
@@ -317,10 +325,14 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
         // 8. Encode offset for third variable field: right_bottom_tree
         buf.extend_from_slice(&(offset_right_bottom as u32).to_le_bytes());
 
-        // 9. Encode variable data in order
+        // 9. Encode offset for fourth variable field: used_epochs
+        buf.extend_from_slice(&(offset_used_epochs as u32).to_le_bytes());
+
+        // 10. Encode variable data in order
         self.top_tree.ssz_append(buf);
         self.left_bottom_tree.ssz_append(buf);
         self.right_bottom_tree.ssz_append(buf);
+        self.used_epochs.ssz_append(buf);
     }
 }
 
@@ -344,6 +356,7 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
         // - left_bottom_tree_index
         // - offset_left_bottom
         // - offset_right_bottom
+        // - offset_used_epochs
         // - variable data
 
         // Get fixed sizes for prf_key and parameter
@@ -363,8 +376,8 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
             ));
         };
 
-        // Minimum size: prf_key + parameter + 3×u64 (24) + 3×offset (12)
-        let min_fixed_size = prf_key_size + parameter_size + 24 + 12;
+        // Minimum size: prf_key + parameter + 3×u64 (24) + 4×offset (16)
+        let min_fixed_size = prf_key_size + parameter_size + 24 + 16;
         if bytes.len() < min_fixed_size {
             return Err(DecodeError::InvalidByteLength {
                 len: bytes.len(),
@@ -442,6 +455,16 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
             })?) as usize;
         pos += 4;
 
+        // 9. Read offset for fourth variable field: used_epochs
+        let offset_used_epochs =
+            u32::from_le_bytes(bytes[pos..pos + 4].try_into().map_err(|_| {
+                DecodeError::InvalidByteLength {
+                    len: bytes.len(),
+                    expected: pos + 4,
+                }
+            })?) as usize;
+        pos += 4;
+
         // Validate that fixed part ends at first offset
         if pos != offset_top_tree {
             return Err(DecodeError::InvalidByteLength {
@@ -453,16 +476,18 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
         // Panic safety: Ensure offsets are monotonic and within bounds
         //
         // This prevents panic when creating slices below
-        // Verify: offset_top <= offset_left <= offset_right <= bytes.len()
+        // Verify: offset_top <= offset_left <= offset_right <= offset_used <= bytes.len()
         if offset_top_tree > offset_left_bottom
             || offset_left_bottom > offset_right_bottom
-            || offset_right_bottom > bytes.len()
+            || offset_right_bottom > offset_used_epochs
+            || offset_used_epochs > bytes.len()
         {
             return Err(DecodeError::BytesInvalid(format!(
-                "Invalid variable offsets: top={} left={} right={} len={}",
+                "Invalid variable offsets: top={} left={} right={} used={} len={}",
                 offset_top_tree,
                 offset_left_bottom,
                 offset_right_bottom,
+                offset_used_epochs,
                 bytes.len()
             )));
         }
@@ -472,7 +497,42 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
             HashSubTree::<TH>::from_ssz_bytes(&bytes[offset_top_tree..offset_left_bottom])?;
         let left_bottom_tree =
             HashSubTree::<TH>::from_ssz_bytes(&bytes[offset_left_bottom..offset_right_bottom])?;
-        let right_bottom_tree = HashSubTree::<TH>::from_ssz_bytes(&bytes[offset_right_bottom..])?;
+        let right_bottom_tree =
+            HashSubTree::<TH>::from_ssz_bytes(&bytes[offset_right_bottom..offset_used_epochs])?;
+        let used_epochs = Vec::<u32>::from_ssz_bytes(&bytes[offset_used_epochs..])?;
+
+        let activation_end = activation_epoch
+            .checked_add(num_active_epochs)
+            .ok_or_else(|| {
+                DecodeError::BytesInvalid("Secret-key activation interval overflows u64".into())
+            })?;
+        let leafs_per_bottom_tree = 1u64
+            .checked_shl((LOG_LIFETIME / 2) as u32)
+            .ok_or_else(|| DecodeError::BytesInvalid("Invalid LOG_LIFETIME".into()))?;
+        let prepared_start = left_bottom_tree_index
+            .checked_mul(leafs_per_bottom_tree)
+            .ok_or_else(|| DecodeError::BytesInvalid("Prepared interval overflows u64".into()))?;
+        let prepared_end = prepared_start
+            .checked_add(2 * leafs_per_bottom_tree)
+            .ok_or_else(|| DecodeError::BytesInvalid("Prepared interval overflows u64".into()))?;
+        if prepared_start < activation_epoch || prepared_end > activation_end {
+            return Err(DecodeError::BytesInvalid(
+                "Prepared interval must be contained in the activation interval".into(),
+            ));
+        }
+        if used_epochs.windows(2).any(|pair| pair[0] >= pair[1])
+            || used_epochs.iter().any(|epoch| {
+                let epoch = u64::from(*epoch);
+                epoch < activation_epoch
+                    || epoch >= activation_end
+                    || epoch < prepared_start
+                    || epoch >= prepared_end
+            })
+        {
+            return Err(DecodeError::BytesInvalid(
+                "Consumed epochs must be unique, sorted, active, and prepared".into(),
+            ));
+        }
 
         Ok(Self {
             prf_key,
@@ -483,6 +543,7 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
             left_bottom_tree_index,
             left_bottom_tree,
             right_bottom_tree,
+            used_epochs,
             _encoding_type: PhantomData,
         })
     }
@@ -535,6 +596,9 @@ where
         self.left_bottom_tree =
             std::mem::replace(&mut self.right_bottom_tree, new_right_bottom_tree);
         self.left_bottom_tree_index += 1;
+        let prepared_start = self.left_bottom_tree_index * leafs_per_bottom_tree;
+        self.used_epochs
+            .retain(|epoch| u64::from(*epoch) >= prepared_start);
     }
 }
 
@@ -654,7 +718,7 @@ where
     const LIFETIME: u64 = 1 << LOG_LIFETIME;
 
     #[allow(clippy::too_many_lines)]
-    fn key_gen<R: RngExt>(
+    fn key_gen<R: RngExt + CryptoRng>(
         rng: &mut R,
         activation_epoch: usize,
         num_active_epochs: usize,
@@ -837,6 +901,7 @@ where
             left_bottom_tree_index,
             left_bottom_tree,
             right_bottom_tree,
+            used_epochs: Vec::new(),
             _encoding_type: PhantomData,
         };
         let pk = Self::get_public_key(&sk);
@@ -845,22 +910,28 @@ where
     }
 
     fn sign(
-        sk: &Self::SecretKey,
+        sk: &mut Self::SecretKey,
         epoch: u32,
         message: &[u8; MESSAGE_LENGTH],
     ) -> Result<Self::Signature, SigningError> {
         // check that epoch is indeed a valid epoch in the activation range
 
-        assert!(
-            sk.get_activation_interval().contains(&(epoch as u64)),
-            "Signing: key not active during this epoch."
-        );
+        if !sk.get_activation_interval().contains(&(epoch as u64)) {
+            return Err(SigningError::EpochOutsideActivation { epoch });
+        }
 
         // check that we are already prepared for this epoch
-        assert!(
-            sk.get_prepared_interval().contains(&(epoch as u64)),
-            "Signing: key not yet prepared for this epoch, try calling sk.advance_preparation."
-        );
+        if !sk.get_prepared_interval().contains(&(epoch as u64)) {
+            return Err(SigningError::EpochNotPrepared { epoch });
+        }
+
+        // Keep the invariant robust even if this key arrived through a serde format
+        // that does not run the canonical SSZ decoder's structural validation.
+        sk.used_epochs.sort_unstable();
+        sk.used_epochs.dedup();
+        let Err(used_epoch_position) = sk.used_epochs.binary_search(&epoch) else {
+            return Err(SigningError::EpochAlreadyUsed { epoch });
+        };
 
         // first component of the signature is the Merkle path that
         // opens the one-time pk for that epoch, where the one-time pk
@@ -884,8 +955,6 @@ where
         while attempts < max_tries {
             // get a randomness and try to encode the message. Note: we get the randomness from the PRF
             // which ensures that signing is deterministic. The PRF is applied to the message and the epoch.
-            // While the intention is that users of the scheme never call sign twice with the same (epoch, sk) pair,
-            // this deterministic approach ensures that calling sign twice is fine, as long as the message stays the same.
             let curr_rho = PRF::get_randomness(&sk.prf_key, epoch, message, attempts as u64).into();
             let curr_x = IE::encode(&sk.parameter.into(), message, &curr_rho, epoch);
 
@@ -930,8 +999,11 @@ where
             })
             .collect();
 
-        // assemble the signature: Merkle path, randomness, chain elements
-        Ok(GeneralizedXMSSSignature { path, rho, hashes })
+        // Assemble the signature, then atomically update the in-memory usage state before
+        // returning it to the caller. The caller must durably persist this updated key state.
+        let signature = GeneralizedXMSSSignature { path, rho, hashes };
+        sk.used_epochs.insert(used_epoch_position, epoch);
+        Ok(signature)
     }
 
     fn verify(
@@ -1115,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_deterministic() {
+    pub fn test_rejects_epoch_reuse() {
         // Note: do not use these parameters, they are just for testing
         type PRF = Blake3Prf;
         type TH = Blake3TweakHash<155>;
@@ -1128,12 +1200,20 @@ mod tests {
         const LOG_LIFETIME: usize = 6;
         type Sig = GeneralizedXMSSSignatureScheme<PRF, IE, TH, LOG_LIFETIME>;
 
-        // we sign the same (epoch, message) pair twice (which users of this code should not do)
-        // and ensure that it produces the same randomness for the signature.
         let mut rng = rand::rng();
         let (_pk, mut sk) = Sig::key_gen(&mut rng, 0, 1 << LOG_LIFETIME);
         let message = rng.random();
         let epoch = 29;
+
+        assert!(matches!(
+            Sig::sign(&mut sk, epoch, &message),
+            Err(SigningError::EpochNotPrepared { epoch: rejected }) if rejected == epoch
+        ));
+        assert!(matches!(
+            Sig::sign(&mut sk, Sig::LIFETIME as u32, &message),
+            Err(SigningError::EpochOutsideActivation { epoch: rejected })
+                if rejected == Sig::LIFETIME as u32
+        ));
 
         // prepare key for epoch
         let mut iterations = 0;
@@ -1147,11 +1227,24 @@ mod tests {
             epoch
         );
 
-        let sig1 = Sig::sign(&sk, epoch, &message).unwrap();
-        let sig2 = Sig::sign(&sk, epoch, &message).unwrap();
-        let rho1 = sig1.rho;
-        let rho2 = sig2.rho;
-        assert_eq!(rho1, rho2);
+        let signature = Sig::sign(&mut sk, epoch, &message).unwrap();
+        assert!(matches!(
+            Sig::sign(&mut sk, epoch, &message),
+            Err(SigningError::EpochAlreadyUsed { epoch: reused }) if reused == epoch
+        ));
+
+        let encoded = sk.as_ssz_bytes();
+        let mut restored = <Sig as SignatureScheme>::SecretKey::from_ssz_bytes(&encoded).unwrap();
+        assert!(matches!(
+            Sig::sign(&mut restored, epoch, &message),
+            Err(SigningError::EpochAlreadyUsed { epoch: reused }) if reused == epoch
+        ));
+        assert!(!signature.hashes.is_empty());
+
+        // Moving beyond the old half-window compacts state that can no longer be used.
+        sk.advance_preparation();
+        sk.advance_preparation();
+        assert!(!sk.used_epochs.contains(&epoch));
     }
 
     #[test]
@@ -1163,10 +1256,10 @@ mod tests {
         type Sig = GeneralizedXMSSSignatureScheme<PRF, IE, TH, 6>;
 
         let mut rng = StdRng::seed_from_u64(7);
-        let (pk, sk) = Sig::key_gen(&mut rng, 0, Sig::LIFETIME as usize);
+        let (pk, mut sk) = Sig::key_gen(&mut rng, 0, Sig::LIFETIME as usize);
         let epoch = 3;
         let message = [11u8; MESSAGE_LENGTH];
-        let signature = Sig::sign(&sk, epoch, &message).unwrap();
+        let signature = Sig::sign(&mut sk, epoch, &message).unwrap();
         assert!(Sig::verify(&pk, epoch, &message, &signature));
 
         let mut wrong_message = message;
@@ -1295,11 +1388,11 @@ mod tests {
         assert_eq!(public_key.parameter, decoded.parameter);
 
         // Test Signature encoding structure
-        let (pk, sk) = Sig::key_gen(&mut rng, 0, 1 << LOG_LIFETIME);
+        let (pk, mut sk) = Sig::key_gen(&mut rng, 0, 1 << LOG_LIFETIME);
         let message = rng.random();
         let epoch = 5;
         // Generate valid signature
-        let signature = Sig::sign(&sk, epoch, &message).unwrap();
+        let signature = Sig::sign(&mut sk, epoch, &message).unwrap();
         // Serialize to bytes
         let sig_encoded = signature.as_ssz_bytes();
         // Calculate randomness size
@@ -1322,7 +1415,7 @@ mod tests {
         // Calculate fixed field sizes
         let prf_key_size = sk2.prf_key.ssz_bytes_len();
         let param_size = sk2.parameter.ssz_bytes_len();
-        let fixed_part_size = prf_key_size + param_size + 8 + 8 + 4 + 8 + 4 + 4;
+        let fixed_part_size = prf_key_size + param_size + 8 + 8 + 4 + 8 + 4 + 4 + 4;
         // Verify minimum size includes all fixed fields
         assert!(sk_encoded.len() >= fixed_part_size);
         // Read activation epoch value from fixed position
@@ -1424,7 +1517,8 @@ mod tests {
 
         // Calculate the exact size of the "Fixed Part" of the SecretKey container.
         //
-        // Layout: [PRF] [Param] [ActEpoch] [NumActive] [OffTop] [LeftIdx] [OffLeft] [OffRight]
+        // Layout: [PRF] [Param] [ActEpoch] [NumActive] [OffTop] [LeftIdx]
+        //         [OffLeft] [OffRight] [OffUsed]
         let fixed_part_len = prf_key_size
             + param_size
             + u64_size // activation_epoch
@@ -1432,7 +1526,8 @@ mod tests {
             + offset_size // offset_top_tree
             + u64_size // left_bottom_tree_index
             + offset_size // offset_left_bottom
-            + offset_size; // offset_right_bottom
+            + offset_size // offset_right_bottom
+            + offset_size; // offset_used_epochs
 
         // Helper: Error Verifier
         fn assert_bytes_invalid<T>(result: Result<T, DecodeError>, expected_msg_part: &str) {
@@ -1554,6 +1649,10 @@ mod tests {
             // 8. Write [Offset Right Bottom Tree]
             // Set to valid relative location to ensure we don't fail on the third offset check first.
             encoded[pos..pos + 4].copy_from_slice(&((fixed_part_len + 50) as u32).to_le_bytes());
+            pos += 4;
+
+            // 9. Write [Offset Used Epochs]
+            encoded[pos..pos + 4].copy_from_slice(&((fixed_part_len + 75) as u32).to_le_bytes());
 
             let result = <Sig as SignatureScheme>::SecretKey::from_ssz_bytes(&encoded);
             assert_bytes_invalid(result, "Invalid variable offsets");
@@ -1586,10 +1685,10 @@ mod tests {
         assert_eq!(encoded1, encoded2);
 
         // Signature: encode same structure twice
-        let (_pk, sk) = Sig::key_gen(&mut rng, 0, 1 << LOG_LIFETIME);
+        let (_pk, mut sk) = Sig::key_gen(&mut rng, 0, 1 << LOG_LIFETIME);
         let message = rng.random();
         let epoch = 5;
-        let signature = Sig::sign(&sk, epoch, &message).unwrap();
+        let signature = Sig::sign(&mut sk, epoch, &message).unwrap();
         // Serialize twice to verify deterministic output
         let sig_encoded1 = signature.as_ssz_bytes();
         let sig_encoded2 = signature.as_ssz_bytes();
@@ -1621,11 +1720,11 @@ mod tests {
         let mut rng = rng();
 
         // Generate keypair and sign message
-        let (pk, sk) = Sig::key_gen(&mut rng, 0, 1 << LOG_LIFETIME);
+        let (pk, mut sk) = Sig::key_gen(&mut rng, 0, 1 << LOG_LIFETIME);
         let message = rng.random();
         let epoch = 7;
         // Create valid signature
-        let signature = Sig::sign(&sk, epoch, &message).unwrap();
+        let signature = Sig::sign(&mut sk, epoch, &message).unwrap();
         // Verify signature is valid before serialization
         assert!(Sig::verify(&pk, epoch, &message, &signature));
 
@@ -1646,9 +1745,14 @@ mod tests {
 
         // Test SecretKey serialization
         let sk_encoded = sk.as_ssz_bytes();
-        let sk_decoded = <Sig as SignatureScheme>::SecretKey::from_ssz_bytes(&sk_encoded).unwrap();
+        let mut sk_decoded =
+            <Sig as SignatureScheme>::SecretKey::from_ssz_bytes(&sk_encoded).unwrap();
+        assert!(matches!(
+            Sig::sign(&mut sk_decoded, epoch, &message),
+            Err(SigningError::EpochAlreadyUsed { epoch: reused }) if reused == epoch
+        ));
         // Sign with decoded key
-        let sig2 = Sig::sign(&sk_decoded, epoch + 1, &message).unwrap();
+        let sig2 = Sig::sign(&mut sk_decoded, epoch + 1, &message).unwrap();
         // Verify signature from decoded key validates
         assert!(Sig::verify(&pk, epoch + 1, &message, &sig2));
     }

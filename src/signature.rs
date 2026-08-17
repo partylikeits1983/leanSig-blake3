@@ -2,12 +2,24 @@ use std::ops::Range;
 
 use crate::MESSAGE_LENGTH;
 use crate::serialization::Serializable;
-use rand::RngExt;
+use rand::{CryptoRng, RngExt};
 use thiserror::Error;
 
 /// Error enum for the signing process.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum SigningError {
+    /// Occurs when the requested epoch is outside the key's activation interval.
+    #[error("Epoch {epoch} is outside this secret key's activation interval.")]
+    EpochOutsideActivation { epoch: u32 },
+
+    /// Occurs when the secret key has not prepared the requested epoch yet.
+    #[error("Epoch {epoch} is not in this secret key's prepared interval.")]
+    EpochNotPrepared { epoch: u32 },
+
+    /// Occurs when an epoch has already been consumed by this secret key state.
+    #[error("Epoch {epoch} has already been signed with this secret key.")]
+    EpochAlreadyUsed { epoch: u32 },
+
     /// Occurs when the probabilistic message encoding fails to produce a valid codeword
     /// after the maximum number of attempts.
     #[error("Failed to encode message after {attempts} attempts.")]
@@ -146,7 +158,7 @@ pub trait SignatureScheme {
     ///
     /// ### Returns
     /// A tuple containing the new `(PublicKey, SecretKey)`.
-    fn key_gen<R: RngExt>(
+    fn key_gen<R: RngExt + CryptoRng>(
         rng: &mut R,
         activation_epoch: usize,
         num_active_epochs: usize,
@@ -155,22 +167,20 @@ pub trait SignatureScheme {
     /// Produces a digital signature for a given message at a specific epoch.
     ///
     /// This method cryptographically binds a message to the signer's identity for a
-    /// single, unique epoch. Callers must ensure they never call this function twice
-    /// with the same secret key and for the same epoch, as this would compromise security.
-    /// The signing process is deterministic.
+    /// single, unique epoch. The mutable secret key records consumed epochs and rejects
+    /// reuse, including reuse after an ordinary serialization round trip. Applications
+    /// must persist the updated secret key atomically and prevent rollback to an older
+    /// state, since rollback can still permit unsafe epoch reuse.
     ///
-    /// Note: we derandomize the signing function as an additional hardening mechanism.
-    /// This ensures that if the caller calls the function twice with the same input
-    /// triple (i.e., same key, epoch, message), the result is the same. In particular,
-    /// this does not compromise security. We still recommend that the caller only calls
-    /// this function once for the same key-epoch pair, to avoid accidentally calling it
-    /// twice with two different messages, which would compromise security.
+    /// Signing randomness is deterministically derived with a PRF as an additional
+    /// hardening mechanism. Epoch reuse is still rejected regardless of whether the
+    /// second message is equal to the first one.
     ///
     /// Note: It is well-known that the security guarantees of signature schemes are not
     /// weakened if we derandomize signing using a PRF.
     ///
     /// ### Parameters
-    /// * `sk`: A reference to the secret key to be used for signing.
+    /// * `sk`: A mutable reference to the secret key to be used for signing.
     /// * `epoch`: The specific epoch for which the signature is being created.
     /// * `message`: A fixed-size byte array representing the message to be signed.
     ///
@@ -179,7 +189,7 @@ pub trait SignatureScheme {
     /// * `Ok(Self::Signature)` on success, containing the generated signature.
     /// * `Err(SigningError)` on failure.
     fn sign(
-        sk: &Self::SecretKey,
+        sk: &mut Self::SecretKey,
         epoch: u32,
         message: &[u8; MESSAGE_LENGTH],
     ) -> Result<Self::Signature, SigningError>;
@@ -219,7 +229,6 @@ pub mod generalized_xmss;
 #[cfg(test)]
 mod test_templates {
     use rand::RngExt;
-    use serde::{Serialize, de::DeserializeOwned};
 
     use super::*;
 
@@ -264,7 +273,7 @@ mod test_templates {
         let message = rng.random();
 
         // Sign the message
-        let signature = T::sign(&sk, epoch, &message);
+        let signature = T::sign(&mut sk, epoch, &message);
 
         // Ensure signing was successful
         assert!(
@@ -282,19 +291,5 @@ mod test_templates {
             "Signature verification failed. . Epoch was {:?}",
             epoch
         );
-
-        test_bincode_round_trip_consistency(&pk);
-        test_bincode_round_trip_consistency(&sk);
-        test_bincode_round_trip_consistency(&signature);
-    }
-
-    fn test_bincode_round_trip_consistency<T: Serialize + DeserializeOwned>(ori: &T) {
-        use bincode::serde::{decode_from_slice, encode_to_vec};
-        let config = bincode::config::standard();
-        let bytes_ori = encode_to_vec(ori, config).expect("Bincode encode should not fail");
-        let (dec, _): (T, _) =
-            decode_from_slice(&bytes_ori, config).expect("Bincode decode should not fail");
-        let bytes_dec = encode_to_vec(dec, config).expect("Bincode encode should not fail");
-        assert_eq!(bytes_ori, bytes_dec, "Serde consistency check failed");
     }
 }

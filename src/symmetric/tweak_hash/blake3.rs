@@ -1,5 +1,7 @@
 //! Domain-separated BLAKE3 hashing for Winternitz chains and Merkle trees.
 
+use std::sync::LazyLock;
+
 use rayon::prelude::*;
 
 use super::{TweakableHash, chain};
@@ -8,6 +10,28 @@ use crate::{HASH_LENGTH, symmetric::prf::Pseudorandom};
 const CHAIN_HASH_CONTEXT: &str = "leansig 2026-08-17 chain hash v1";
 const TREE_LEAF_CONTEXT: &str = "leansig 2026-08-17 tree leaf hash v1";
 const TREE_NODE_CONTEXT: &str = "leansig 2026-08-17 tree node hash v1";
+
+static CHAIN_HASHER: LazyLock<blake3::Hasher> =
+    LazyLock::new(|| blake3::Hasher::new_derive_key(CHAIN_HASH_CONTEXT));
+static TREE_LEAF_HASHER: LazyLock<blake3::Hasher> =
+    LazyLock::new(|| blake3::Hasher::new_derive_key(TREE_LEAF_CONTEXT));
+static TREE_NODE_HASHER: LazyLock<blake3::Hasher> =
+    LazyLock::new(|| blake3::Hasher::new_derive_key(TREE_NODE_CONTEXT));
+
+fn initialized_tree_hasher(
+    template: &blake3::Hasher,
+    parameter: &[u8; HASH_LENGTH],
+    level: u8,
+    position: u32,
+    input_count: usize,
+) -> blake3::Hasher {
+    let mut hasher = template.clone();
+    hasher.update(parameter);
+    hasher.update(&[level]);
+    hasher.update(&position.to_le_bytes());
+    hasher.update(&(input_count as u32).to_le_bytes());
+    hasher
+}
 
 /// Addresses a hash invocation within a Winternitz chain or Merkle tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +56,7 @@ impl<const NUM_CHUNKS: usize> TweakableHash for Blake3TweakHash<NUM_CHUNKS> {
     type Tweak = Blake3Tweak;
     type Domain = [u8; HASH_LENGTH];
 
-    fn rand_parameter<R: rand::RngExt>(rng: &mut R) -> Self::Parameter {
+    fn rand_parameter<R: rand::RngExt + rand::CryptoRng>(rng: &mut R) -> Self::Parameter {
         rng.random()
     }
 
@@ -57,36 +81,33 @@ impl<const NUM_CHUNKS: usize> TweakableHash for Blake3TweakHash<NUM_CHUNKS> {
         tweak: &Self::Tweak,
         message: &[Self::Domain],
     ) -> Self::Domain {
-        let (context, level, position) = match *tweak {
+        let (template, level, position) = match *tweak {
             Blake3Tweak::Chain {
                 epoch,
                 chain_index,
                 position,
             } => {
                 assert_eq!(message.len(), 1, "chain hashing requires one input");
-                let mut hasher = blake3::Hasher::new_derive_key(CHAIN_HASH_CONTEXT);
+                let mut hasher = (*CHAIN_HASHER).clone();
                 hasher.update(parameter);
                 hasher.update(&epoch.to_le_bytes());
                 hasher.update(&[chain_index, position]);
                 hasher.update(&message[0]);
                 return *hasher.finalize().as_bytes();
             }
-            Blake3Tweak::Tree { level: 0, position } => (TREE_LEAF_CONTEXT, 0, position),
+            Blake3Tweak::Tree { level: 0, position } => (&*TREE_LEAF_HASHER, 0, position),
             Blake3Tweak::Tree { level, position } => {
                 assert_eq!(
                     message.len(),
                     2,
                     "internal tree hashing requires two children"
                 );
-                (TREE_NODE_CONTEXT, level, position)
+                (&*TREE_NODE_HASHER, level, position)
             }
         };
 
-        let mut hasher = blake3::Hasher::new_derive_key(context);
-        hasher.update(parameter);
-        hasher.update(&[level]);
-        hasher.update(&position.to_le_bytes());
-        hasher.update(&(message.len() as u32).to_le_bytes());
+        let mut hasher =
+            initialized_tree_hasher(template, parameter, level, position, message.len());
         for value in message {
             hasher.update(value);
         }
@@ -105,24 +126,25 @@ impl<const NUM_CHUNKS: usize> TweakableHash for Blake3TweakHash<NUM_CHUNKS> {
         PRF::Domain: Into<Self::Domain>,
     {
         assert_eq!(num_chains, NUM_CHUNKS);
+        assert!(chain_length >= 1);
         epochs
             .par_iter()
             .map(|epoch| {
-                let chain_ends: Vec<_> = (0..num_chains)
-                    .map(|chain_index| {
-                        let start =
-                            PRF::get_domain_element(prf_key, *epoch, chain_index as u64).into();
-                        chain::<Self>(
-                            parameter,
-                            *epoch,
-                            chain_index as u8,
-                            0,
-                            chain_length - 1,
-                            &start,
-                        )
-                    })
-                    .collect();
-                Self::apply(parameter, &Self::tree_tweak(0, *epoch), &chain_ends)
+                let mut hasher =
+                    initialized_tree_hasher(&TREE_LEAF_HASHER, parameter, 0, *epoch, num_chains);
+                for chain_index in 0..num_chains {
+                    let start = PRF::get_domain_element(prf_key, *epoch, chain_index as u64).into();
+                    let chain_end = chain::<Self>(
+                        parameter,
+                        *epoch,
+                        chain_index as u8,
+                        0,
+                        chain_length - 1,
+                        &start,
+                    );
+                    hasher.update(&chain_end);
+                }
+                *hasher.finalize().as_bytes()
             })
             .collect()
     }

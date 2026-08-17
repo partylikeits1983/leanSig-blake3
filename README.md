@@ -4,14 +4,15 @@ This repository contains an experimental Rust implementation of synchronized has
 It was originally developed in [this repository](https://github.com/b-wagn/hash-sig).
 
 
-*Note: Rust version >= 1.87 is required.*
+*Note: Rust version >= 1.90 is required.*
 
 ## Disclaimers
 
 The code has *not been audited and is not meant to be used in production*. It is a playground to explore and benchmark these signatures. Use it at your own risk.
 
-The implementation takes a generic RNG as input (e.g., `key_gen`, see below). Users must make sure that the RNG is *cryptographically secure*.
-The examples below, tests, and benchmarks just use a default (potentially insecure) RNG for illustration.
+Key generation requires an RNG implementing Rust's `CryptoRng` marker trait. Tests and
+benchmarks use either the thread RNG or a deterministically seeded `StdRng`; seeded RNGs
+are for reproducible measurements only, not production key generation.
 
 ## Signature Interface
 
@@ -21,6 +22,8 @@ If you want to use this library, the main interface is that of a *(synchronized)
 - A function `verify` to verify signatures for a given message, public key, and epoch.
 
 Importantly, each pair of secret key and epoch must not be used twice as input to `sign`.
+The implementation records consumed epochs and rejects reuse, but callers must atomically
+persist the mutated secret key and prevent rollback to an older serialized state.
 
 Further, the secret keys need to be prepared for epochs by calling `sk.advance_preparation()`, which moves the interval `sk.get_prepared_interval()` further to the right.
 In particular, we assume that users of the code sign for epochs in order and call `sk.advance_preparation()` at some point in the background
@@ -46,10 +49,10 @@ while !sk.get_prepared_interval().contains(&(epoch as u64)) && iterations < epoc
 assert!(sk.get_prepared_interval().contains(&(epoch as u64)));
 
 // now we can sign
-let sig = S::sign(&sk, epoch, &message);
+let sig = T::sign(&mut sk, epoch, &message).expect("signing succeeds");
 
 // verify the signature
-let is_valid = S::verify(&pk, epoch, &message, &sig);
+let is_valid = T::verify(&pk, epoch, &message, &sig);
 ```
 
 See also function `test_signature_scheme_correctness` in [this file](https://github.com/leanEthereum/leanSig/blob/main/src/signature.rs).
@@ -116,6 +119,8 @@ python3 benchmark-mean.py target --intervals
 
 See [BENCHMARKS.md](BENCHMARKS.md) for the matched Poseidon/BLAKE3 comparison,
 including methodology, latency distributions, and serialized-size tradeoffs.
+The implementation review, fixed findings, and remaining deployment risks are in
+[AUDIT.md](AUDIT.md).
 
 ## Status
 

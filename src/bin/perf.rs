@@ -47,8 +47,9 @@ fn benchmark<S: SignatureScheme>(label: &str) {
         keypair = Some(generated);
     }
 
-    let (pk, sk) = keypair.expect("at least one keygen run");
+    let (pk, mut sk) = keypair.expect("at least one keygen run");
     let prepared = sk.get_prepared_interval();
+    let initial_secret_key_bytes = sk.to_bytes().len();
     assert!(sign_runs <= (prepared.end - prepared.start) as usize);
 
     let mut rng = StdRng::seed_from_u64(0x51a0_0001);
@@ -58,7 +59,7 @@ fn benchmark<S: SignatureScheme>(label: &str) {
         let epoch = prepared.start as u32 + i as u32;
         let message: [u8; MESSAGE_LENGTH] = rng.random();
         let started = Instant::now();
-        let signature = S::sign(&sk, epoch, &message).expect("benchmark signing must succeed");
+        let signature = S::sign(&mut sk, epoch, &message).expect("benchmark signing must succeed");
         sign_samples.push(started.elapsed());
         cases.push((epoch, message, signature));
     }
@@ -77,7 +78,8 @@ fn benchmark<S: SignatureScheme>(label: &str) {
     print_stats("sign", &sign_samples);
     print_stats("verify", &verify_samples);
     println!("public_key_bytes={}", pk.to_bytes().len());
-    println!("secret_key_bytes={}", sk.to_bytes().len());
+    println!("secret_key_bytes={initial_secret_key_bytes}");
+    println!("secret_key_bytes_after_signing={}", sk.to_bytes().len());
     println!("signature_bytes={}", cases[0].2.to_bytes().len());
 }
 

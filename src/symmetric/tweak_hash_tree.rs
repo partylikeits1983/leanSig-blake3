@@ -605,17 +605,6 @@ pub fn hash_tree_verify<TH: TweakableHash>(
     // large the tree was. So we can check if the
     // position makes sense.
     let depth = opening.co_path.len();
-    let num_leafs: u64 = 1 << depth;
-
-    debug_assert!(
-        depth <= 32,
-        "Hash-Tree verify: Tree depth must be at most 32"
-    );
-
-    debug_assert!(
-        (position as u64) < num_leafs,
-        "Hash-Tree verify: Position and Path Length not compatible"
-    );
 
     // some sanity checks: Tree depth must be at most 32
     // and Position and Path Length must be compatible
@@ -623,9 +612,12 @@ pub fn hash_tree_verify<TH: TweakableHash>(
     if depth > 32 {
         return false;
     }
+    let num_leafs: u64 = 1 << depth;
     if (position as u64) >= num_leafs {
         return false;
     }
+
+    debug_assert!((position as u64) < num_leafs);
 
     // first hash the leaf to get the node in the bottom layer
     let tweak = TH::tree_tweak(0, position);
@@ -1050,6 +1042,12 @@ mod tests {
             result,
             Err(DecodeError::InvalidByteLength { expected: 4, .. })
         ));
+
+        // Openings deeper than the u32-addressable tree are rejected without panicking.
+        let opening = HashTreeOpening::<TestTH> {
+            co_path: vec![[0u8; 32]; 33],
+        };
+        assert!(!hash_tree_verify(&[0u8; 32], &[0u8; 32], 0, &[], &opening));
     }
 
     #[test]

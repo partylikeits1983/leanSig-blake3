@@ -2,7 +2,8 @@
 name = "leansig"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.90"
+autobenches = false
 
 [lints.clippy]
 # all lints that are on by default (correctness, suspicious, style, complexity, perf)
@@ -41,7 +42,6 @@ ssz = { package = "ethereum_ssz", version = "0.10.0" }
 [dev-dependencies]
 criterion = "0.7"
 proptest = "1.7"
-bincode = { version = "2.0.1", features = ["serde"] }
 
 [features]
 slow-tests = []

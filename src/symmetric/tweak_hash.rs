@@ -1,4 +1,4 @@
-use rand::RngExt;
+use rand::{CryptoRng, RngExt};
 
 use rayon::prelude::*;
 
@@ -28,7 +28,7 @@ pub trait TweakableHash {
     type Domain: Copy + PartialEq + Send + Sync + Serializable;
 
     /// Generates a random public parameter.
-    fn rand_parameter<R: RngExt>(rng: &mut R) -> Self::Parameter;
+    fn rand_parameter<R: RngExt + CryptoRng>(rng: &mut R) -> Self::Parameter;
 
     /// Generates a random domain element.
     fn rand_domain<R: RngExt>(rng: &mut R) -> Self::Domain;

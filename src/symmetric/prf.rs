@@ -1,4 +1,4 @@
-use rand::RngExt;
+use rand::{CryptoRng, RngExt};
 
 use crate::serialization::Serializable;
 
@@ -11,7 +11,7 @@ pub trait Pseudorandom {
     type Randomness;
 
     /// Sample a random key for the PRF
-    fn key_gen<R: RngExt>(rng: &mut R) -> Self::Key;
+    fn key_gen<R: RngExt + CryptoRng>(rng: &mut R) -> Self::Key;
 
     /// Apply the PRF to an epoch and an index to get a pseudorandom domain element.
     /// This can be used to create the chain starts pseudorandomly.

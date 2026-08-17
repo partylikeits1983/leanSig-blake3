@@ -7,12 +7,12 @@ use leansig::signature::generalized_xmss::instantiations_blake3::lifetime_2_to_t
 use leansig::signature::generalized_xmss::instantiations_blake3::lifetime_2_to_the_20::target_sum::SIGTargetSumLifetime20W2NoOff;
 use leansig::signature::generalized_xmss::instantiations_blake3::lifetime_2_to_the_20::target_sum::SIGTargetSumLifetime20W4NoOff;
 use leansig::signature::generalized_xmss::instantiations_blake3::lifetime_2_to_the_20::target_sum::SIGTargetSumLifetime20W8NoOff;
-use rand::RngExt;
 use rand::rngs::ThreadRng;
+use rand::{CryptoRng, RngExt};
 use std::time::Instant;
 
 // Function to measure execution time
-fn measure_time<T: SignatureScheme, R: RngExt>(description: &str, rng: &mut R) {
+fn measure_time<T: SignatureScheme, R: RngExt + CryptoRng>(description: &str, rng: &mut R) {
     // key gen
 
     let start = Instant::now();

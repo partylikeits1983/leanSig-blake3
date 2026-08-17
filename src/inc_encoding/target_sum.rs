@@ -51,7 +51,7 @@ impl<MH: MessageHash, const TARGET_SUM: usize> IncomparableEncoding
 
     const BASE: usize = MH::BASE;
 
-    fn rand<R: rand::RngExt>(rng: &mut R) -> Self::Randomness {
+    fn rand<R: rand::RngExt + rand::CryptoRng>(rng: &mut R) -> Self::Randomness {
         MH::rand(rng)
     }
 

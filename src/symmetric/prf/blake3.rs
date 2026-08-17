@@ -15,7 +15,7 @@ impl Pseudorandom for Blake3Prf {
     type Domain = [u8; HASH_LENGTH];
     type Randomness = [u8; HASH_LENGTH];
 
-    fn key_gen<R: rand::RngExt>(rng: &mut R) -> Self::Key {
+    fn key_gen<R: rand::RngExt + rand::CryptoRng>(rng: &mut R) -> Self::Key {
         rng.random()
     }
 
