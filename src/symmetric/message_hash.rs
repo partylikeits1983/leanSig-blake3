@@ -39,5 +39,4 @@ pub trait MessageHash {
     ) -> Result<Vec<u8>, Self::Error>;
 }
 
-pub mod aborting;
-pub mod poseidon;
+pub mod blake3;

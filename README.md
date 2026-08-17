@@ -1,6 +1,6 @@
-# LeanSig in Rust
+# BLAKE3 LeanSig in Rust
 
-This repository contains a *prototypical* Rust implementation of (synchronized) signatures based on tweakable hash functions and incomparable encodings.
+This repository contains an experimental Rust implementation of synchronized hash-based signatures using BLAKE3 end to end.
 It was originally developed in [this repository](https://github.com/b-wagn/hash-sig).
 
 
@@ -56,15 +56,19 @@ See also function `test_signature_scheme_correctness` in [this file](https://git
 
 ## Schemes
 The code implements a generic framework from [this paper](https://eprint.iacr.org/2025/055.pdf), which builds XMSS-like hash-based signatures from a primitive called incomparable encodings.
-Hardcoded instantiations of this generic framework (using Poseidon1) are defined in `leansig::signature::generalized_xmss`.
-The parameters have been chosen based on the analysis in the paper using Python scripts. Details are as follows:
+Concrete BLAKE3 instantiations are defined in
+`leansig::signature::generalized_xmss::instantiations_blake3`.
+The target-sum dimensions, bases, and targets are inherited from the existing LeanSig parameter sets, while all cryptographic values are 256-bit byte strings.
 
-| Submodule        | Paper / Documentation                                     | Parameters Set With     |
-|---------------|-----------------------------------------------------------|--------------------------|
-| `instantiations_poseidon::*`   | [original paper](https://eprint.iacr.org/2025/055.pdf)    | [this repository](https://github.com/b-wagn/hashsig-parameters)   |
-| `instantiations_poseidon_top_level::*`   | [this document](https://eprint.iacr.org/2025/1332), inspired by [this](https://eprint.iacr.org/2025/889.pdf)  | [this repository](https://github.com/b-wagn/hypercube-hashsig-parameters)   |
+### BLAKE3 construction
 
-Instantiations for different key lifetimes and different encodings are given in these modules.
+- PRF keys, public salts, Merkle nodes, chain values, and signing randomness are all 32 bytes.
+- Chain starts and deterministic signing randomness use keyed BLAKE3 with distinct purpose tags.
+- Message hashing uses BLAKE3's XOF and unbiased rejection sampling to produce uniform chunks for any base from 2 through 256.
+- Winternitz-chain, Merkle-leaf, and Merkle-node hashes use separate BLAKE3 derive-key contexts and bind all address metadata.
+- Integers in cryptographic transcripts are encoded little-endian. Variable-length hash lists include their element count.
+
+This is a new, wire-incompatible prototype. Keys and signatures created by earlier implementations cannot be decoded or verified by this version.
 
 ## Tests
 
@@ -93,11 +97,10 @@ Run them with
 cargo bench
 ```
 
-The schemes that are benchmarked are hardcoded instantiations of the generic framework, which are defined in `leansig::signature::generalized_xmss`.
-The parameters of these instantiations have been chosen carefully with the aim to achieve a desired security level.
+The default Criterion suite measures signing and verification for representative lifetime-`2^18` W1 and W4 instantiations.
 By default, key generation is not benchmarked. There are two options to benchmark it:
-1. add the option `--features with-gen-benches-poseidon` or `--features with-gen-benches-poseidon-top-level` to `cargo bench`. Note that this will make benchmarks very slow, as key generation will be repeated within the benchmarks. Especially for Poseidon, this is not recommended.
-2. use code similar to the one provided in `src/bin/main.rs` and run it with `cargo run --release`.
+1. Run `cargo bench --features with-gen-benches-blake3`.
+2. Run the reproducible end-to-end harness with `cargo run --release --bin perf`. Its key-generation and signing sample counts can be set with `LEANSIG_KEYGEN_RUNS` and `LEANSIG_SIGN_RUNS`.
 
 If criterion only generates json files, one way to extract all means for all benchmarks easily (without re-running criterion) is to run
 
@@ -111,14 +114,12 @@ Confidence intervals can also be shown via
 python3 benchmark-mean.py target --intervals
 ```
 
-## Deviations from the [original paper](https://eprint.iacr.org/2025/055.pdf)
+See [BENCHMARKS.md](BENCHMARKS.md) for the matched Poseidon/BLAKE3 comparison,
+including methodology, latency distributions, and serialized-size tradeoffs.
 
-- use of 'overwrite' sponge, instead of 'addition' / 'xor' sponge, when hashing the WOTS pubkey.
-- sponge data layout: [capacity | rate] instead of [rate | capacity].
-- WOTS encoding: use [message, parameters, epoch, randomness] instead of [randomness, parameters, epoch, message].
-- Hash chains: use [current_value | parameter | tweak] instead of [parameter | tweak | current_value].
+## Status
 
-Deviations are motivated by [leanVM](https://github.com/leanEthereum/leanMultisig) friendliness (XMSS aggregation requiring fewer cycles). They do not impact the security level.
+The BLAKE3 construction intentionally deviates from the field-oriented construction in the paper. It has not been audited and should not be treated as production cryptography without an independent design and implementation review.
 
 ## License
 

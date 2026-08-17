@@ -9,8 +9,8 @@ pub trait Serializable: Serialize + DeserializeOwned + Encode + Decode + Sized {
     ///
     /// # Canonical Format
     ///
-    /// - All field elements are converted to canonical `u32` form (not Montgomery)
-    /// - All `u32` values are encoded as 4 bytes in little-endian order
+    /// - BLAKE3 values are encoded as fixed 32-byte byte vectors.
+    /// - Integer metadata is encoded in little-endian order by SSZ.
     ///
     /// # Returns
     ///
@@ -24,8 +24,8 @@ pub trait Serializable: Serialize + DeserializeOwned + Encode + Decode + Sized {
     /// # Canonical Format
     ///
     /// The input bytes must follow the same canonical format as `to_bytes()`:
-    /// - Field elements as canonical `u32` values (4 bytes, little-endian)
-    /// - Composite structures following SSZ layout rules
+    /// - BLAKE3 values as fixed 32-byte byte vectors.
+    /// - Composite structures following SSZ layout rules.
     ///
     /// # Arguments
     ///

@@ -1070,11 +1070,8 @@ impl<PRF: Pseudorandom, IE: IncomparableEncoding, TH: TweakableHash, const LOG_L
 {
 }
 
-/// Instantiations of the generalized XMSS signature scheme based on the
-/// aborting hypercube message hash (rejection sampling)
-pub mod instantiations_aborting;
-/// Instantiations of the generalized XMSS signature scheme based on Poseidon1
-pub mod instantiations_poseidon;
+/// Concrete generalized XMSS signature schemes using BLAKE3 end to end.
+pub mod instantiations_blake3;
 
 #[cfg(test)]
 mod tests {
@@ -1082,35 +1079,27 @@ mod tests {
         inc_encoding::target_sum::TargetSumEncoding,
         signature::test_templates::test_signature_scheme_correctness,
         symmetric::{
-            message_hash::{
-                MessageHash,
-                aborting::AbortingHypercubeMessageHash,
-                poseidon::{PoseidonMessageHash, PoseidonMessageHashW1},
-            },
-            prf::shake_to_field::ShakePRFtoF,
-            tweak_hash::poseidon::PoseidonTweakW1L5,
+            message_hash::{MessageHash, blake3::Blake3MessageHash},
+            prf::blake3::Blake3Prf,
+            tweak_hash::blake3::Blake3TweakHash,
         },
     };
 
     use super::*;
 
-    use crate::array::FieldArray;
-    use p3_field::PrimeField32;
     use proptest::prelude::*;
 
-    use crate::{F, symmetric::tweak_hash::poseidon::PoseidonTweakHash};
-    use p3_field::RawDataSerializable;
-    use rand::{RngExt, rng};
+    use rand::{RngExt, SeedableRng, rng, rngs::StdRng};
     use ssz::{Decode, Encode};
 
-    type TestTH = PoseidonTweakHash<5, 7, 2, 9, 155>;
+    type TestTH = Blake3TweakHash<155>;
 
     #[test]
-    pub fn test_target_sum_poseidon() {
+    pub fn test_target_sum_blake3() {
         // Note: do not use these parameters, they are just for testing
-        type PRF = ShakePRFtoF<7, 5>;
-        type TH = PoseidonTweakW1L5;
-        type MH = PoseidonMessageHashW1;
+        type PRF = Blake3Prf;
+        type TH = Blake3TweakHash<155>;
+        type MH = Blake3MessageHash<155, 2>;
         const BASE: usize = MH::BASE;
         const NUM_CHUNKS: usize = MH::DIMENSION;
         const MAX_CHUNK_VALUE: usize = BASE - 1;
@@ -1128,9 +1117,9 @@ mod tests {
     #[test]
     pub fn test_deterministic() {
         // Note: do not use these parameters, they are just for testing
-        type PRF = ShakePRFtoF<7, 5>;
-        type TH = PoseidonTweakW1L5;
-        type MH = PoseidonMessageHashW1;
+        type PRF = Blake3Prf;
+        type TH = Blake3TweakHash<155>;
+        type MH = Blake3MessageHash<155, 2>;
         const BASE: usize = MH::BASE;
         const NUM_CHUNKS: usize = MH::DIMENSION;
         const MAX_CHUNK_VALUE: usize = BASE - 1;
@@ -1166,11 +1155,44 @@ mod tests {
     }
 
     #[test]
-    pub fn test_large_base_poseidon() {
+    fn test_rejects_tampering() {
+        type PRF = Blake3Prf;
+        type TH = Blake3TweakHash<16>;
+        type MH = Blake3MessageHash<16, 2>;
+        type IE = TargetSumEncoding<MH, 8>;
+        type Sig = GeneralizedXMSSSignatureScheme<PRF, IE, TH, 6>;
+
+        let mut rng = StdRng::seed_from_u64(7);
+        let (pk, sk) = Sig::key_gen(&mut rng, 0, Sig::LIFETIME as usize);
+        let epoch = 3;
+        let message = [11u8; MESSAGE_LENGTH];
+        let signature = Sig::sign(&sk, epoch, &message).unwrap();
+        assert!(Sig::verify(&pk, epoch, &message, &signature));
+
+        let mut wrong_message = message;
+        wrong_message[0] ^= 1;
+        assert!(!Sig::verify(&pk, epoch, &wrong_message, &signature));
+        assert!(!Sig::verify(&pk, epoch + 1, &message, &signature));
+
+        let mut wrong_rho = signature.clone();
+        wrong_rho.rho[0] ^= 1;
+        assert!(!Sig::verify(&pk, epoch, &message, &wrong_rho));
+
+        let mut wrong_hash = signature.clone();
+        wrong_hash.hashes[0][0] ^= 1;
+        assert!(!Sig::verify(&pk, epoch, &message, &wrong_hash));
+
+        let mut wrong_pk = pk;
+        wrong_pk.parameter[0] ^= 1;
+        assert!(!Sig::verify(&wrong_pk, epoch, &message, &signature));
+    }
+
+    #[test]
+    pub fn test_large_base_blake3() {
         // Note: do not use these parameters, they are just for testing
-        type PRF = ShakePRFtoF<4, 8>;
-        type TH = PoseidonTweakHash<4, 4, 2, 8, 32>;
-        type MH = PoseidonMessageHash<4, 8, 8, 32, 256, 2, 9>;
+        type PRF = Blake3Prf;
+        type TH = Blake3TweakHash<32>;
+        type MH = Blake3MessageHash<32, 256>;
         const TARGET_SUM: usize = 1 << 12;
         type IE = TargetSumEncoding<MH, TARGET_SUM>;
         const LOG_LIFETIME: usize = 10;
@@ -1181,11 +1203,11 @@ mod tests {
     }
 
     #[test]
-    pub fn test_large_dimension_poseidon() {
+    pub fn test_large_dimension_blake3() {
         // Note: do not use these parameters, they are just for testing
-        type PRF = ShakePRFtoF<8, 8>;
-        type TH = PoseidonTweakHash<4, 8, 2, 8, 256>;
-        type MH = PoseidonMessageHash<4, 8, 8, 256, 2, 2, 9>;
+        type PRF = Blake3Prf;
+        type TH = Blake3TweakHash<256>;
+        type MH = Blake3MessageHash<256, 2>;
         const TARGET_SUM: usize = 128;
         type IE = TargetSumEncoding<MH, TARGET_SUM>;
         const LOG_LIFETIME: usize = 10;
@@ -1196,11 +1218,10 @@ mod tests {
     }
 
     #[test]
-    pub fn test_aborting_target_sum() {
-        // KoalaBear: p = 127 * 8^8 + 1, so w=8, z=8, Q=127
-        type PRF = ShakePRFtoF<7, 5>;
-        type TH = PoseidonTweakHash<5, 7, 2, 9, 64>;
-        type MH = AbortingHypercubeMessageHash<5, 5, 8, 64, 8, 8, 127, 2, 9>;
+    pub fn test_base8_target_sum() {
+        type PRF = Blake3Prf;
+        type TH = Blake3TweakHash<64>;
+        type MH = Blake3MessageHash<64, 8>;
         const TARGET_SUM: usize = MH::DIMENSION * (MH::BASE - 1) / 2; // 224
         type IE = TargetSumEncoding<MH, TARGET_SUM>;
         const LOG_LIFETIME: usize = 6;
@@ -1247,9 +1268,9 @@ mod tests {
 
     #[test]
     fn test_ssz_encoding_structure() {
-        type PRF = ShakePRFtoF<7, 5>;
-        type TH = PoseidonTweakW1L5;
-        type MH = PoseidonMessageHashW1;
+        type PRF = Blake3Prf;
+        type TH = Blake3TweakHash<155>;
+        type MH = Blake3MessageHash<155, 2>;
         const BASE: usize = MH::BASE;
         const NUM_CHUNKS: usize = MH::DIMENSION;
         const MAX_CHUNK_VALUE: usize = BASE - 1;
@@ -1266,11 +1287,8 @@ mod tests {
         let public_key = GeneralizedXMSSPublicKey::<TestTH> { root, parameter };
         // Serialize to bytes
         let encoded = public_key.as_ssz_bytes();
-        // Verify expected size based on field element counts
-        assert_eq!(encoded.len(), (7 + 5) * F::NUM_BYTES);
-        // Verify first field element is encoded correctly
-        let first_fe_bytes = root.as_ssz_bytes();
-        assert_eq!(&encoded[0..F::NUM_BYTES], &first_fe_bytes[0..F::NUM_BYTES]);
+        assert_eq!(encoded.len(), 64);
+        assert_eq!(&encoded[..32], root);
         // Decode and verify roundtrip
         let decoded = GeneralizedXMSSPublicKey::<TestTH>::from_ssz_bytes(&encoded).unwrap();
         assert_eq!(public_key.root, decoded.root);
@@ -1324,9 +1342,9 @@ mod tests {
 
     #[test]
     fn test_ssz_decoding_errors() {
-        type PRF = ShakePRFtoF<7, 5>;
-        type TH = PoseidonTweakW1L5;
-        type MH = PoseidonMessageHashW1;
+        type PRF = Blake3Prf;
+        type TH = Blake3TweakHash<155>;
+        type MH = Blake3MessageHash<155, 2>;
         const BASE: usize = MH::BASE;
         const NUM_CHUNKS: usize = MH::DIMENSION;
         const MAX_CHUNK_VALUE: usize = BASE - 1;
@@ -1335,57 +1353,43 @@ mod tests {
         const LOG_LIFETIME: usize = 6;
         type Sig = GeneralizedXMSSSignatureScheme<PRF, IE, TH, LOG_LIFETIME>;
 
-        // PublicKey: buffer too small
-        // TestTH = PoseidonTweakW1L5 has FieldArray<7> hash and FieldArray<5> domain
-        // Total size: (7 + 5) * F::NUM_BYTES = 12 * 4 = 48 bytes
-        // Create buffer with only 47 bytes (one byte short)
-        let encoded = vec![0u8; 47];
+        // PublicKey: buffer too small (root + public salt = 64 bytes).
+        let encoded = vec![0u8; 63];
         // Attempt decode with insufficient bytes
         let result = GeneralizedXMSSPublicKey::<TestTH>::from_ssz_bytes(&encoded);
-        // Decoder reports actual buffer size (47) vs expected (48)
         assert!(matches!(
             result,
             Err(DecodeError::InvalidByteLength {
-                len: 47,
-                expected: 48
+                len: 63,
+                expected: 64
             })
         ));
 
-        // Signature: buffer too small - only 8 bytes when we need more
-        // IE::Randomness = MH::Randomness = FieldArray<5> (from PoseidonMessageHashW1)
-        // FieldArray<5> has ssz_fixed_len() = 5 * F::NUM_BYTES = 5 * 4 = 20 bytes
-        // Minimum size: offset (4) + rho (20) + offset (4) = 28 bytes
+        // Signature: minimum fixed part is offset + 32-byte rho + offset = 40 bytes.
         let encoded = vec![0u8; 8];
         let result = <Sig as SignatureScheme>::Signature::from_ssz_bytes(&encoded);
-        // Decoder checks min_size at line 119: reports actual (8) vs expected (28)
         assert!(matches!(
             result,
             Err(DecodeError::InvalidByteLength {
                 len: 8,
-                expected: 28
+                expected: 40
             })
         ));
 
         // Signature: invalid offset value pointing to wrong location
-        // Create buffer with sufficient space (28 + 100 bytes)
+        // Create buffer with sufficient space.
         let mut encoded = vec![0u8; 128];
-        // Write incorrect offset (99) that doesn't match expected first offset (28)
+        // Write incorrect offset that doesn't match the 40-byte fixed part.
         encoded[0..4].copy_from_slice(&99u32.to_le_bytes());
-        // Write valid rho data at bytes 4..24 (20 bytes of zeros is valid FieldArray<5>)
-        for i in 0..20 {
-            encoded[4 + i] = 0;
-        }
-        // Write second offset at position 24..28 (actual value doesn't matter)
-        encoded[24..28].copy_from_slice(&78u32.to_le_bytes());
+        encoded[36..40].copy_from_slice(&78u32.to_le_bytes());
         // Attempt decode with invalid first offset
         let result = <Sig as SignatureScheme>::Signature::from_ssz_bytes(&encoded);
-        // Decoder at line 149 checks: offset_path (99) != expected_offset_path (28)
-        // Expected offset points to byte immediately after fixed part: 4 + 20 + 4 = 28
+        // The decoder checks that offset_path points immediately after the fixed part.
         assert!(matches!(
             result,
             Err(DecodeError::InvalidByteLength {
                 len: 99,
-                expected: 28
+                expected: 40
             })
         ));
     }
@@ -1393,9 +1397,9 @@ mod tests {
     #[test]
     #[allow(clippy::items_after_statements)]
     fn test_ssz_panic_safety_malicious_offsets() {
-        type PRF = ShakePRFtoF<7, 5>;
-        type TH = PoseidonTweakW1L5;
-        type MH = PoseidonMessageHashW1;
+        type PRF = Blake3Prf;
+        type TH = Blake3TweakHash<155>;
+        type MH = Blake3MessageHash<155, 2>;
         const BASE: usize = MH::BASE;
         const NUM_CHUNKS: usize = MH::DIMENSION;
         const MAX_CHUNK_VALUE: usize = BASE - 1;
@@ -1558,9 +1562,9 @@ mod tests {
 
     #[test]
     fn test_ssz_determinism() {
-        type PRF = ShakePRFtoF<7, 5>;
-        type TH = PoseidonTweakW1L5;
-        type MH = PoseidonMessageHashW1;
+        type PRF = Blake3Prf;
+        type TH = Blake3TweakHash<155>;
+        type MH = Blake3MessageHash<155, 2>;
         const BASE: usize = MH::BASE;
         const NUM_CHUNKS: usize = MH::DIMENSION;
         const MAX_CHUNK_VALUE: usize = BASE - 1;
@@ -1603,9 +1607,9 @@ mod tests {
 
     #[test]
     fn test_ssz_signature_integration() {
-        type PRF = ShakePRFtoF<7, 5>;
-        type TH = PoseidonTweakW1L5;
-        type MH = PoseidonMessageHashW1;
+        type PRF = Blake3Prf;
+        type TH = Blake3TweakHash<155>;
+        type MH = Blake3MessageHash<155, 2>;
         const BASE: usize = MH::BASE;
         const NUM_CHUNKS: usize = MH::DIMENSION;
         const MAX_CHUNK_VALUE: usize = BASE - 1;
@@ -1683,16 +1687,12 @@ mod tests {
 
         #[test]
         fn proptest_ssz_public_key_roundtrip_and_determinism(
-            root_values in prop::collection::vec(0u32..F::ORDER_U32, 7),
-            param_values in prop::collection::vec(0u32..F::ORDER_U32, 5)
+            root in prop::array::uniform32(any::<u8>()),
+            parameter in prop::array::uniform32(any::<u8>())
         ) {
-            // build public key from random field element values
-            let root_arr: [F; 7] = std::array::from_fn(|i| F::new(root_values[i]));
-            let param_arr: [F; 5] = std::array::from_fn(|i| F::new(param_values[i]));
-
             let original = GeneralizedXMSSPublicKey::<TestTH> {
-                root: FieldArray(root_arr),
-                parameter: FieldArray(param_arr),
+                root,
+                parameter,
             };
 
             // encode to SSZ bytes
@@ -1702,8 +1702,7 @@ mod tests {
             // check encoding is deterministic
             prop_assert_eq!(&encoded1, &encoded2);
 
-            // check size matches expected (7 + 5 field elements * 4 bytes)
-            let expected_size = 12 * F::NUM_BYTES;
+            let expected_size = 64;
             prop_assert_eq!(encoded1.len(), expected_size);
             prop_assert_eq!(original.ssz_bytes_len(), expected_size);
 

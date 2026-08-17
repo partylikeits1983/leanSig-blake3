@@ -27,4 +27,4 @@ pub trait Pseudorandom {
     ) -> Self::Randomness;
 }
 
-pub mod shake_to_field;
+pub mod blake3;

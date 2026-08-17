@@ -67,14 +67,12 @@ pub trait TweakableHash {
     /// A vector of parent nodes with length `children.len() / 2`.
     ///
     /// This default implementation processes pairs in parallel using Rayon.
-    /// The Poseidon implementation overrides this with a SIMD-accelerated variant.
     fn compute_tree_layer(
         parameter: &Self::Parameter,
         level: u8,
         parent_start: usize,
         children: &[Self::Domain],
     ) -> Vec<Self::Domain> {
-        // default implementation is scalar. tweak_tree/poseidon.rs provides a SIMD variant
         children
             .par_chunks_exact(2)
             .enumerate()
@@ -132,16 +130,16 @@ pub fn chain<TH: TweakableHash>(
     current
 }
 
-pub mod poseidon;
+pub mod blake3;
 
 #[cfg(test)]
 mod tests {
-    use crate::symmetric::tweak_hash::poseidon::PoseidonTweak44;
+    use crate::symmetric::tweak_hash::blake3::Blake3TweakHash;
 
     use super::*;
     use proptest::prelude::*;
 
-    type TestTH = PoseidonTweak44;
+    type TestTH = Blake3TweakHash<128>;
 
     #[test]
     fn test_chain_associative() {

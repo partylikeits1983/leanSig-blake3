@@ -661,11 +661,11 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use crate::symmetric::tweak_hash::poseidon::PoseidonTweak44;
+    use crate::symmetric::tweak_hash::blake3::Blake3TweakHash;
 
     use super::*;
 
-    type TestTH = PoseidonTweak44;
+    type TestTH = Blake3TweakHash<128>;
 
     /// We test that the following honest procedure succeeds:
     /// (1) build the Merkle tree to get the root,

@@ -146,22 +146,20 @@ impl<MH: MessageHash, const TARGET_SUM: usize> IncomparableEncoding
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::F;
-    use crate::array::FieldArray;
-    use crate::symmetric::message_hash::poseidon::PoseidonMessageHash445;
-    use p3_field::PrimeField32;
+    use crate::symmetric::message_hash::blake3::Blake3MessageHash;
     use proptest::prelude::*;
     use rand::RngExt;
 
-    const TEST_TARGET_SUM: usize = 115;
-    type TestTargetSumEncoding = TargetSumEncoding<PoseidonMessageHash445, TEST_TARGET_SUM>;
+    const TEST_TARGET_SUM: usize = 192;
+    type TestMessageHash = Blake3MessageHash<128, 4>;
+    type TestTargetSumEncoding = TargetSumEncoding<TestMessageHash, TEST_TARGET_SUM>;
 
     #[test]
     fn test_successful_encoding_fixed_message() {
         // keep message fixed and only resample randomness
         // this mirrors the actual signature scheme behavior
         let mut rng = rand::rng();
-        let parameter: FieldArray<4> = FieldArray(rng.random());
+        let parameter = rng.random();
         let message: [u8; 32] = rng.random();
         let epoch = 0u32;
 
@@ -203,7 +201,7 @@ mod tests {
         let epoch = 0u32;
 
         for _ in 0..1_000 {
-            let parameter: FieldArray<4> = FieldArray(rng.random());
+            let parameter = rng.random();
             let message: [u8; 32] = rng.random();
             let randomness = TestTargetSumEncoding::rand(&mut rng);
 
@@ -238,18 +236,12 @@ mod tests {
         #[test]
         fn proptest_encoding_determinism_and_error_reporting(
             message in prop::array::uniform32(any::<u8>()),
-            randomness_values in prop::collection::vec(0u32..F::ORDER_U32, 4),
-            parameter_values in prop::collection::vec(0u32..F::ORDER_U32, 4),
+            randomness in prop::array::uniform32(any::<u8>()),
+            parameter in prop::array::uniform32(any::<u8>()),
             epoch in any::<u32>()
         ) {
-            // build randomness and parameter from proptest values
-            let randomness_arr: [F; 4] = std::array::from_fn(|i| F::new(randomness_values[i]));
-            let randomness = FieldArray(randomness_arr);
-            let parameter_arr: [F; 4] = std::array::from_fn(|i| F::new(parameter_values[i]));
-            let parameter = FieldArray(parameter_arr);
-
             // compute expected sum from underlying message hash
-            let hash_chunks = PoseidonMessageHash445::apply(&parameter, epoch, &randomness, &message).unwrap();
+            let hash_chunks = TestMessageHash::apply(&parameter, epoch, &randomness, &message).unwrap();
             let hash_sum: usize = hash_chunks.iter().map(|&x| x as usize).sum();
 
             // call encode twice to check determinism
@@ -287,6 +279,7 @@ mod tests {
                     let sum: usize = chunks.iter().map(|&x| x as usize).sum();
                     prop_assert_eq!(sum, TEST_TARGET_SUM);
                 }
+                Err(TargetSumError::HashError(error)) => match error {},
             }
         }
     }
