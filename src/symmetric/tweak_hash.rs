@@ -5,68 +5,37 @@ use rayon::prelude::*;
 use crate::serialization::Serializable;
 use crate::symmetric::prf::Pseudorandom;
 
-/// Trait to model a tweakable hash function.
-/// Such a function takes a public parameter, a tweak, and a
-/// message to be hashed. The tweak should be understood as an
-/// address for domain separation.
-///
-/// In our setting, we require the support of hashing lists of
-/// hashes. Therefore, we just define a type `Domain` and the
-/// hash function maps from [Domain] to Domain.
-///
-/// We also require that the tweak hash already specifies how
-/// to obtain distinct tweaks for applications in chains and
-/// applications in Merkle trees.
+/// Addressed hash used by Winternitz chains and Merkle trees.
 pub trait TweakableHash {
-    /// Public parameter type for the hash function
+    /// Public hash parameter.
     type Parameter: Copy + Send + Sync + Serializable;
 
-    /// Tweak type for domain separation
+    /// Address type.
     type Tweak;
 
-    /// Domain element type (defines output and input types to the hash)
+    /// Hash input and output type.
     type Domain: Copy + PartialEq + Send + Sync + Serializable;
 
-    /// Generates a random public parameter.
+    /// Samples the public hash parameter.
     fn rand_parameter<R: RngExt + CryptoRng>(rng: &mut R) -> Self::Parameter;
 
-    /// Generates a random domain element.
+    /// Samples a domain element for tree padding and tests.
     fn rand_domain<R: RngExt>(rng: &mut R) -> Self::Domain;
 
-    /// Returns a tweak to be used in the Merkle tree.
-    /// Note: this is assumed to be distinct from the outputs of chain_tweak
+    /// Returns a Merkle-tree address distinct from chain addresses.
     fn tree_tweak(level: u8, pos_in_level: u32) -> Self::Tweak;
 
-    /// Returns a tweak to be used in chains.
-    /// Note: this is assumed to be distinct from the outputs of tree_tweak
+    /// Returns a chain address distinct from tree addresses.
     fn chain_tweak(epoch: u32, chain_index: u8, pos_in_chain: u8) -> Self::Tweak;
 
-    /// Applies the tweakable hash to parameter, tweak, and message.
+    /// Hashes domain elements at an address.
     fn apply(
         parameter: &Self::Parameter,
         tweak: &Self::Tweak,
         message: &[Self::Domain],
     ) -> Self::Domain;
 
-    /// Computes one layer of a Merkle tree by hashing pairs of children into parents.
-    ///
-    /// Consecutive pairs of child nodes produce their parent node by hashing
-    /// `(children[2*i], children[2*i+1])`. Each hash application uses a unique
-    /// tweak derived from the tree level and position.
-    ///
-    /// # Arguments
-    /// * `parameter` - Public parameter for the hash function
-    /// * `level` - Tree level of the *parent* nodes being computed. NOTE: callers
-    ///   need to pass `level + 1` where `level` is the children's level, since
-    ///   tree levels are numbered from leaves (level 0) upward.
-    /// * `parent_start` - Starting index of the first parent in this layer, used
-    ///   for computing position-dependent tweaks
-    /// * `children` - Slice of child nodes to hash pairwise (length must be even)
-    ///
-    /// # Returns
-    /// A vector of parent nodes with length `children.len() / 2`.
-    ///
-    /// This default implementation processes pairs in parallel using Rayon.
+    /// Hashes consecutive child pairs into one Merkle-tree layer.
     fn compute_tree_layer(
         parameter: &Self::Parameter,
         level: u8,
@@ -85,9 +54,7 @@ pub trait TweakableHash {
             .collect()
     }
 
-    /// Computes bottom tree leaves by walking hash chains for multiple epochs.
-    ///
-    /// This method has a default scalar implementation that processes epochs in parallel.
+    /// Computes bottom-tree leaves from complete Winternitz chains.
     fn compute_tree_leaves<PRF>(
         prf_key: &PRF::Key,
         parameter: &Self::Parameter,
@@ -101,13 +68,7 @@ pub trait TweakableHash {
         Self: Sized;
 }
 
-/// Function implementing hash chains, implemented over a tweakable hash function
-/// The chain is specific to an epoch `epoch`, and an index `chain_index`. All
-/// evaluations of the tweakable hash function use the given parameter `parameter`
-/// and tweaks determined by `epoch`, `chain_index`, and their position in the chain.
-/// We start walking the chain at position `start_pos_in_chain` with `start`,
-/// and then walk the chain for `steps` many steps. For example, walking two steps
-/// with `start = A` would mean we walk A -> B -> C, and then return C.
+/// Walks `steps` positions in an addressed hash chain.
 #[allow(clippy::too_long_first_doc_paragraph)]
 pub fn chain<TH: TweakableHash>(
     parameter: &TH::Parameter,
@@ -117,16 +78,13 @@ pub fn chain<TH: TweakableHash>(
     steps: usize,
     start: &TH::Domain,
 ) -> TH::Domain {
-    // keep track of what we have
     let mut current = *start;
 
-    // otherwise, walk the right amount of steps
     for j in 0..steps {
         let tweak = TH::chain_tweak(epoch, chain_index, start_pos_in_chain + (j as u8) + 1u8);
         current = TH::apply(parameter, &tweak, &[current]);
     }
 
-    // return where we are now
     current
 }
 
@@ -145,23 +103,18 @@ mod tests {
     fn test_chain_associative() {
         let mut rng = rand::rng();
 
-        // we test that first walking k steps, and then walking the remaining steps
-        // is the same as directly walking all steps.
-
         let epoch = 9;
         let chain_index = 20;
         let parameter = TestTH::rand_parameter(&mut rng);
         let start = TestTH::rand_domain(&mut rng);
         let total_steps = 16;
 
-        // walking directly
         let end_direct = chain::<TestTH>(&parameter, epoch, chain_index, 0, total_steps, &start);
 
         for split in 0..=total_steps {
             let steps_a = split;
             let steps_b = total_steps - split;
 
-            // walking indirectly
             let intermediate = chain::<TestTH>(&parameter, epoch, chain_index, 0, steps_a, &start);
             let end_indirect = chain::<TestTH>(
                 &parameter,
@@ -172,7 +125,6 @@ mod tests {
                 &intermediate,
             );
 
-            // should be the same
             assert_eq!(end_direct, end_indirect);
         }
     }
@@ -181,23 +133,17 @@ mod tests {
     fn test_chain_associative_max_value() {
         let mut rng = rand::rng();
 
-        // we test that first walking k steps, and then walking the remaining steps
-        // is the same as directly walking all steps.
-
         let epoch = 12;
         let chain_index = 210;
         let parameter = TestTH::rand_parameter(&mut rng);
         let start = TestTH::rand_domain(&mut rng);
-        let total_steps = u8::MAX as usize; // max if we say that pos_in_chain is u8
-
-        // walking directly
+        let total_steps = u8::MAX as usize;
         let end_direct = chain::<TestTH>(&parameter, epoch, chain_index, 0, total_steps, &start);
 
         for split in 0..=total_steps {
             let steps_a = split;
             let steps_b = total_steps - split;
 
-            // walking indirectly
             let intermediate = chain::<TestTH>(&parameter, epoch, chain_index, 0, steps_a, &start);
             let end_indirect = chain::<TestTH>(
                 &parameter,
@@ -208,7 +154,6 @@ mod tests {
                 &intermediate,
             );
 
-            // should be the same
             assert_eq!(end_direct, end_indirect);
         }
     }
@@ -216,46 +161,27 @@ mod tests {
     proptest! {
         #[test]
         fn proptest_chain_associative(
-            // Random epoch for domain separation (small range to keep tests fast)
             epoch in 0u32..100,
-
-            // Random chain index to simulate different chains (small range to keep tests fast)
             chain_index in 0u8..10,
-
-            // Total number of steps to walk along the chain (bounded to keep tests fast)
             total_steps in 0usize..16,
         ) {
-            // Random number generator for generating parameters and start point
             let mut rng = rand::rng();
-
-            // Generate a random public parameter for the tweakable hash function
             let parameter = TestTH::rand_parameter(&mut rng);
-
-            // Generate a random starting domain element (initial hash state)
             let start = TestTH::rand_domain(&mut rng);
-
-            // Compute the result of walking the entire chain in one go
             let end_direct = chain::<TestTH>(&parameter, epoch, chain_index, 0, total_steps, &start);
-
-            // For every way of splitting the walk into two segments...
             for split in 0..=total_steps {
-                let steps_a = split;                  // First segment length
-                let steps_b = total_steps - split;    // Second segment length
-
-                // First walk: from start, walk `steps_a` steps
+                let steps_a = split;
+                let steps_b = total_steps - split;
                 let intermediate = chain::<TestTH>(&parameter, epoch, chain_index, 0, steps_a, &start);
-
-                // Second walk: continue from intermediate point for `steps_b` steps
                 let end_indirect = chain::<TestTH>(
                     &parameter,
                     epoch,
                     chain_index,
-                    steps_a as u8,   // Start position for second segment
+                    steps_a as u8,
                     steps_b,
                     &intermediate,
                 );
 
-                // Check that walking in one go or in two segments gives the same result
                 prop_assert_eq!(end_direct, end_indirect);
             }
         }

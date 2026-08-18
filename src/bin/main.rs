@@ -11,21 +11,16 @@ use rand::rngs::ThreadRng;
 use rand::{CryptoRng, RngExt};
 use std::time::Instant;
 
-// Function to measure execution time
 fn measure_time<T: SignatureScheme, R: RngExt + CryptoRng>(description: &str, rng: &mut R) {
-    // key gen
-
     let start = Instant::now();
     let (_pk, _sk) = T::key_gen(rng, 0, T::LIFETIME as usize);
     let duration = start.elapsed();
     println!("{description} - Gen: {duration:?}");
 }
 
-// Main function to run the program
 fn main() {
     let mut rng = rand::rng();
 
-    // Lifetime 2^18 - Target Sum
     measure_time::<SIGTargetSumLifetime18W1NoOff, ThreadRng>(
         "BLAKE3 - L 18 - Target Sum - w 1",
         &mut rng,
@@ -43,7 +38,6 @@ fn main() {
         &mut rng,
     );
 
-    // Lifetime 2^20 - Target Sum
     measure_time::<SIGTargetSumLifetime20W1NoOff, ThreadRng>(
         "BLAKE3 - L 20 - Target Sum - w 1",
         &mut rng,

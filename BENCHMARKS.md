@@ -60,3 +60,6 @@ samples and 1,000 sign/verify samples.
 - Results are specific to this machine and build.
 - Key generation has few samples because each run builds the full key state.
 - Target-sum signing time varies with the number of encoding retries.
+- Poseidon chain and path values serialize to 28 bytes; BLAKE3 uses 32-byte
+  outputs. For W1, this accounts for 692 of the 700 extra signature bytes. The
+  other 8 bytes come from encoding randomness.

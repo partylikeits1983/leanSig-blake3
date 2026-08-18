@@ -4,21 +4,19 @@ use crate::serialization::Serializable;
 
 use crate::MESSAGE_LENGTH;
 
-/// Trait to model a pseudorandom function (PRF)
+/// Pseudorandom functions used by the signer.
 pub trait Pseudorandom {
     type Key: Send + Sync + Serializable;
     type Domain;
     type Randomness;
 
-    /// Sample a random key for the PRF
+    /// Samples a PRF key.
     fn key_gen<R: RngExt + CryptoRng>(rng: &mut R) -> Self::Key;
 
-    /// Apply the PRF to an epoch and an index to get a pseudorandom domain element.
-    /// This can be used to create the chain starts pseudorandomly.
+    /// Derives a hash-chain start.
     fn get_domain_element(key: &Self::Key, epoch: u32, index: u64) -> Self::Domain;
 
-    /// Apply the PRF to an epoch, a message, and a counter to get a pseudorandom randomness.
-    /// This can be used to produce a stream of (pseudo-)randomness for the encoding.
+    /// Derives deterministic encoding randomness.
     fn get_randomness(
         key: &Self::Key,
         epoch: u32,

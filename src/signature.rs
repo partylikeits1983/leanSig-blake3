@@ -5,208 +5,72 @@ use crate::serialization::Serializable;
 use rand::{CryptoRng, RngExt};
 use thiserror::Error;
 
-/// Error enum for the signing process.
+/// Signing errors.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SigningError {
-    /// Occurs when the requested epoch is outside the key's activation interval.
+    /// The epoch is outside the key's activation interval.
     #[error("Epoch {epoch} is outside this secret key's activation interval.")]
     EpochOutsideActivation { epoch: u32 },
 
-    /// Occurs when the secret key has not prepared the requested epoch yet.
+    /// The key has not prepared this epoch.
     #[error("Epoch {epoch} is not in this secret key's prepared interval.")]
     EpochNotPrepared { epoch: u32 },
 
-    /// Occurs when an epoch has already been consumed by this secret key state.
+    /// The key has already signed in this epoch.
     #[error("Epoch {epoch} has already been signed with this secret key.")]
     EpochAlreadyUsed { epoch: u32 },
 
-    /// Occurs when the probabilistic message encoding fails to produce a valid codeword
-    /// after the maximum number of attempts.
+    /// No valid codeword was found within the attempt limit.
     #[error("Failed to encode message after {attempts} attempts.")]
     EncodingAttemptsExceeded { attempts: usize },
 }
 
-/// Defines the interface for a synchronized signature scheme secret key.
-///
-/// Motivation:
-/// In schemes based on Merkle trees, storing the full (sparse) Merkle tree for a key
-/// with a long lifetime is often infeasible due to memory requirements. E.g., a key
-/// with activation time of 2^32 epochs may require hundreds of gigabytes of storage.
-///
-/// This interface allows the implementation to use a "top-bottom" tree approach, in
-/// which the Merkle tree is partitioned into a single top tree and multiple bottom trees.
-/// The secret key stores the top tree at any time, and a limited window of consecutive
-/// bottom trees at any given time. This means that at any point in time, the key is only
-/// prepared to sign for a sub-interval of the activation interval.
-///
-/// This trait provides an interface to manage this sliding window of prepared intervals.
-/// The `advance_preparation` method allows the user to proactively move this window to
-/// the right, i.e., change the prepared interval to the next one, if possible.
+/// State needed to maintain the sliding window of prepared Merkle subtrees.
 pub trait SignatureSchemeSecretKey {
-    /// Returns the total interval of epochs for which this key is valid.
-    ///
-    /// This interval is determined during key generation and remains constant
-    /// throughout the key's lifetime.
-    ///
-    /// The interval is guaranteed to:
-    /// - Be a superset of the lifetime specified during key generation.
-    /// - Start at a multiple of `sqrt(LIFETIME)`.
-    /// - Have a length that is a multiple of `sqrt(LIFETIME)`.
-    /// - Have a minimum length of `2 * sqrt(LIFETIME)`.
+    /// Epochs covered by the key.
     fn get_activation_interval(&self) -> Range<u64>;
 
-    /// Returns the sub-interval for which the key is currently prepared to sign messages.
-    ///
-    /// This "prepared interval" represents a sliding window over the activation interval.
-    ///
-    /// It is guaranteed to:
-    /// - Be a sub-interval of the `activation_interval`.
-    /// - Start at a multiple of `sqrt(LIFETIME)`.
-    /// - Have a fixed length of exactly `2 * sqrt(LIFETIME)`.
-    ///
-    /// Note: it can be changed by calling `advance_preparation`.
+    /// Epochs covered by the two bottom trees currently in memory.
     fn get_prepared_interval(&self) -> Range<u64>;
 
-    /// Advances the prepared interval to the next one while maintaining an overlap
-    /// to ensure a seamless transition. If the next interval would extend beyond the
-    /// key's total activation interval, this function does nothing.
-    ///
-    /// ### Example
-    /// If the prepared interval is `[a, a + 2 * sqrt(LIFETIME))`, a call to this
-    /// function will advance it to `[a + sqrt(LIFETIME), a + 3 * sqrt(LIFETIME))`.
-    ///
-    /// The caller is responsible for invoking this method only after signing for epochs
-    /// in the first `sqrt(LIFETIME)` part of the current interval is complete.
+    /// Drops the oldest bottom tree and prepares the next one, if it is active.
     fn advance_preparation(&mut self);
 }
 
-/// Defines the interface for a **synchronized signature scheme**.
+/// Stateful hash-based signature scheme.
 ///
-/// ## Overview
-///
-/// In a synchronized (or stateful) signature scheme, keys are associated with a fixed
-/// lifetime, which is divided into discrete time periods called **epochs**. A key pair
-/// is restricted to signing only once per epoch. Reusing an epoch to sign a
-/// different message or even the same message again will compromise the security of the scheme.
-///
-/// This model is particularly well-suited for consensus protocols like Ethereum's
-/// proof-of-stake (lean Ethereum), where validators sign messages
-/// (e.g., block proposals or attestations) at regular, predetermined intervals.
-///
-/// ## Theoretical Foundation
-///
-/// This trait abstracts the family of post-quantum signature schemes presented in
-/// "Hash-Based Multi-Signatures for Post-Quantum Ethereum" [DKKW25a] and its
-/// extension "LeanSig for Post-Quantum Ethereum" [DKKW25b]. These schemes are variants of
-/// the **eXtended Merkle Signature Scheme (XMSS)**, which builds a many-time signature
-/// scheme from a one-time signature (OTS) primitive and a Merkle tree.
-///
-/// References:
-/// [DKKW25a] https://eprint.iacr.org/2025/055.pdf
-/// [DKKW25b] https://eprint.iacr.org/2025/1332.pdf
+/// A key may sign once per epoch. See <https://eprint.iacr.org/2025/055.pdf>.
 pub trait SignatureScheme {
-    /// The public key used for verification.
-    ///
-    /// The key must be serializable to allow for network transmission and storage.
-    ///
-    /// We must support SSZ encoding for Ethereum consensus layer compatibility.
+    /// Serializable public key.
     type PublicKey: Serializable;
 
-    /// The secret key used for signing.
-    ///
-    /// The key must be serializable for persistence and secure backup.
-    ///
-    /// We must support SSZ encoding for Ethereum consensus layer compatibility.
+    /// Serializable stateful secret key.
     type SecretKey: SignatureSchemeSecretKey + Serializable;
 
-    /// The signature object produced by the signing algorithm.
-    ///
-    /// The signature must be serializable to allow for network transmission and storage.
-    ///
-    /// We must support SSZ encoding for Ethereum consensus layer compatibility.
+    /// Serializable signature.
     type Signature: Serializable;
 
-    /// The maximum number of epochs supported by this signature scheme configuration,
-    /// denoted as $L$ in the literature [DKKW25a, DKKW25b].
-    ///
-    /// This constant defines the total number of epochs available, i.e., valid epochs range
-    /// from `0` to `LIFETIME - 1`. While this is the maximum possible lifetime, an individual
-    /// key pair can be generated to be active for a shorter, specific range of epochs within
-    // this total lifetime using the`key_gen` function.
-    ///
-    /// This value **must** be a power of two.
+    /// Maximum number of epochs. Must be a power of two.
     const LIFETIME: u64;
 
-    /// Generates a new cryptographic key pair.
-    ///
-    /// This function creates a fresh public key for verifying signatures and a
-    /// corresponding secret key for creating them.
-    ///
-    /// ### Active Range
-    ///
-    /// The generated key pair is configured to be active only for a specific sub-range
-    /// of its total `LIFETIME`. This is a practical optimization for key management,
-    /// allowing a single cryptographic setup to support keys with different lifespans.
-    ///
-    /// The active period covers all epochs in the range
-    /// `activation_epoch..activation_epoch + num_active_epochs`.
-    ///
-    /// ### Parameters
-    /// * `rng`: A cryptographically secure random number generator.
-    /// * `activation_epoch`: The starting epoch for which this key is active.
-    /// * `num_active_epochs`: The number of consecutive epochs for which this key is active.
-    ///
-    /// ### Returns
-    /// A tuple containing the new `(PublicKey, SecretKey)`.
+    /// Generates a key active for the requested epoch range.
     fn key_gen<R: RngExt + CryptoRng>(
         rng: &mut R,
         activation_epoch: usize,
         num_active_epochs: usize,
     ) -> (Self::PublicKey, Self::SecretKey);
 
-    /// Produces a digital signature for a given message at a specific epoch.
+    /// Signs once at `epoch` and records the epoch in `sk`.
     ///
-    /// This method cryptographically binds a message to the signer's identity for a
-    /// single, unique epoch. The mutable secret key records consumed epochs and rejects
-    /// reuse, including reuse after an ordinary serialization round trip. Applications
-    /// must persist the updated secret key atomically and prevent rollback to an older
-    /// state, since rollback can still permit unsafe epoch reuse.
-    ///
-    /// Signing randomness is deterministically derived with a PRF as an additional
-    /// hardening mechanism. Epoch reuse is still rejected regardless of whether the
-    /// second message is equal to the first one.
-    ///
-    /// Note: It is well-known that the security guarantees of signature schemes are not
-    /// weakened if we derandomize signing using a PRF.
-    ///
-    /// ### Parameters
-    /// * `sk`: A mutable reference to the secret key to be used for signing.
-    /// * `epoch`: The specific epoch for which the signature is being created.
-    /// * `message`: A fixed-size byte array representing the message to be signed.
-    ///
-    /// ### Returns
-    /// A `Result` which is:
-    /// * `Ok(Self::Signature)` on success, containing the generated signature.
-    /// * `Err(SigningError)` on failure.
+    /// Persist the updated key before releasing the signature. Restoring older key
+    /// state can bypass epoch-reuse protection.
     fn sign(
         sk: &mut Self::SecretKey,
         epoch: u32,
         message: &[u8; MESSAGE_LENGTH],
     ) -> Result<Self::Signature, SigningError>;
 
-    /// Verifies a digital signature against a public key, message, and epoch.
-    ///
-    /// This function determines if a signature is valid and was generated by the
-    /// holder of the corresponding secret key for the specified message and epoch.
-    ///
-    /// ### Parameters
-    /// * `pk`: A reference to the public key against which to verify the signature.
-    /// * `epoch`: The epoch the signature corresponds to.
-    /// * `message`: The message that was supposedly signed.
-    /// * `sig`: A reference to the signature to be verified.
-    ///
-    /// ### Returns
-    /// `true` if the signature is valid according to the scheme's rules, `false` otherwise.
+    /// Verifies a signature for `message` at `epoch`.
     fn verify(
         pk: &Self::PublicKey,
         epoch: u32,
@@ -214,13 +78,7 @@ pub trait SignatureScheme {
         sig: &Self::Signature,
     ) -> bool;
 
-    /// Get public key corresponding to given secret key.
-    ///
-    /// ### Parameters
-    /// * `sk`: A reference to the secret key.
-    ///
-    /// ### Returns
-    /// Public key corresponding to given secret key.
+    /// Derives the public key from a secret key.
     fn get_public_key(sk: &Self::SecretKey) -> Self::PublicKey;
 }
 
@@ -232,17 +90,13 @@ mod test_templates {
 
     use super::*;
 
-    /// Generic test for any implementation of the `SignatureScheme` trait.
-    /// Tests correctness, i.e., that honest key gen, honest signing, implies
-    /// that the verifier accepts the signature. A random message is used.
+    /// Runs a sign/verify round trip for a scheme.
     pub fn test_signature_scheme_correctness<T: SignatureScheme>(
         epoch: u32,
         activation_epoch: usize,
         num_active_epochs: usize,
     ) {
-        // The epoch must be in the activation interval
-        // Note that we need to do the second check as u64, as otherwise we get
-        // overflows when we have the full 2^32 lifetime as activation time
+        // Use u64 for the end check so a 2^32 lifetime does not wrap.
         assert!(
             activation_epoch as u32 <= epoch
                 && (epoch as u64) < (activation_epoch + num_active_epochs) as u64,
@@ -254,10 +108,8 @@ mod test_templates {
 
         let mut rng = rand::rng();
 
-        // Generate a key pair
         let (pk, mut sk) = T::key_gen(&mut rng, activation_epoch, num_active_epochs);
 
-        // Advance the secret key until the epoch is in the prepared interval
         let mut iterations = 0;
         while !sk.get_prepared_interval().contains(&(epoch as u64)) && iterations < epoch {
             sk.advance_preparation();
@@ -269,13 +121,9 @@ mod test_templates {
             epoch
         );
 
-        // Sample random test message
         let message = rng.random();
-
-        // Sign the message
         let signature = T::sign(&mut sk, epoch, &message);
 
-        // Ensure signing was successful
         assert!(
             signature.is_ok(),
             "Signing failed: {:?}. Epoch was {:?}",
@@ -283,7 +131,6 @@ mod test_templates {
             epoch
         );
 
-        // Verify the signature
         let signature = signature.unwrap();
         let is_valid = T::verify(&pk, epoch, &message, &signature);
         assert!(
