@@ -92,6 +92,18 @@ Removing the `--release` is also an option but tests will take even longer.
 
 ## Benchmarks
 
+Latest local lifetime-`2^18` W1 target-sum results on an Apple M4 Pro:
+
+| Operation | Poseidon mean | BLAKE3 mean | BLAKE3 speedup |
+|---|---:|---:|---:|
+| Key generation | 3.488 s | 1.166 s | 2.99x |
+| Signing | 346.8 us | 51.1 us | 6.79x |
+| Verification | 264.0 us | 19.5 us | 13.54x |
+
+The Poseidon run used three key-generation and 200 sign/verify samples; the
+BLAKE3 run used five key-generation and 1,000 sign/verify samples. These are
+directional local results, not a cross-platform performance guarantee.
+
 Benchmarks are provided using criterion.
 They take a while, as key generation is expensive, and as a large number of schemes are benchmarked.
 Run them with
@@ -124,7 +136,7 @@ The implementation review, fixed findings, and remaining deployment risks are in
 
 ## Status
 
-The BLAKE3 construction intentionally deviates from the field-oriented construction in the paper. It has not been audited and should not be treated as production cryptography without an independent design and implementation review.
+The BLAKE3 construction intentionally deviates from the field-oriented construction in the paper. It has received an internal implementation review, but not an independent cryptographic audit, and should not be treated as production cryptography without one.
 
 ## License
 
