@@ -1,6 +1,7 @@
 # BLAKE3 LeanSig in Rust
 
-BLAKE3-based [LeanSig](https://github.com/leanEthereum/leanSig) implementation in Rust.
+Experimental BLAKE3-based stateful signature scheme in Rust, based on
+[LeanSig](https://github.com/leanEthereum/leanSig).
 
 ## Performance
 
