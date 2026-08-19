@@ -15,6 +15,13 @@ Benchmarked on an Apple M4 Pro using a key lifetime of 262,144 epochs and the W1
 
 [Full benchmark data and methodology](BENCHMARKS.md)
 
+The key-generation hot path also has a pure-Rust, four-lane AArch64 NEON
+backend for independent short BLAKE3 hashes. It preserves the existing
+LeanSig/XMSS construction and hash transcripts; other architectures use the
+scalar fallback. On this M4 Pro, the experimental 2^32-lifetime parameter set
+improves by about 2.3x at practical benchmark sizes. A full 2^32 key was not
+generated. See [key-generation scaling and projections](KEYGEN_BENCHMARKS.md).
+
 ## Basic use
 
 ```rust
@@ -62,6 +69,7 @@ cargo test --release --features slow-tests
 cargo bench
 cargo bench --features with-gen-benches-blake3
 cargo run --release --bin perf
+cargo run --release --bin keygen_lifetime32 -- --epochs '2^20' --runs 3
 ```
 
 Set `LEANSIG_KEYGEN_RUNS` and `LEANSIG_SIGN_RUNS` to change its sample counts.

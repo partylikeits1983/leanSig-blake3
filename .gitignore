@@ -1,5 +1,8 @@
 /target
 
+# Locally generated signing keys and benchmark artifacts
+/artifacts
+
 /.debug
 
 # Proptest data

@@ -16,6 +16,11 @@ pub trait Pseudorandom {
     /// Derives a hash-chain start.
     fn get_domain_element(key: &Self::Key, epoch: u32, index: u64) -> Self::Domain;
 
+    /// Derives four independent hash-chain starts for SIMD-friendly callers.
+    fn get_domain_elements_4(key: &Self::Key, epochs: [u32; 4], index: u64) -> [Self::Domain; 4] {
+        epochs.map(|epoch| Self::get_domain_element(key, epoch, index))
+    }
+
     /// Derives deterministic encoding randomness.
     fn get_randomness(
         key: &Self::Key,

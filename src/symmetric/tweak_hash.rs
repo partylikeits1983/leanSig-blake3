@@ -89,6 +89,7 @@ pub fn chain<TH: TweakableHash>(
 }
 
 pub mod blake3;
+pub(crate) mod blake3_simd;
 
 #[cfg(test)]
 mod tests {

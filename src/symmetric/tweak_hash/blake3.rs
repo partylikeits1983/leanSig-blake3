@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 
 use rayon::prelude::*;
 
+use super::blake3_simd::{SIMD_LANES, chain_4};
 use super::{TweakableHash, chain};
 use crate::{HASH_LENGTH, symmetric::prf::Pseudorandom};
 
@@ -13,6 +14,8 @@ const TREE_NODE_CONTEXT: &str = "leansig 2026-08-17 tree node hash v1";
 
 static CHAIN_HASHER: LazyLock<blake3::Hasher> =
     LazyLock::new(|| blake3::Hasher::new_derive_key(CHAIN_HASH_CONTEXT));
+static CHAIN_CONTEXT_KEY: LazyLock<[u8; HASH_LENGTH]> =
+    LazyLock::new(|| blake3::hazmat::hash_derive_key_context(CHAIN_HASH_CONTEXT));
 static TREE_LEAF_HASHER: LazyLock<blake3::Hasher> =
     LazyLock::new(|| blake3::Hasher::new_derive_key(TREE_LEAF_CONTEXT));
 static TREE_NODE_HASHER: LazyLock<blake3::Hasher> =
@@ -114,6 +117,8 @@ impl<const NUM_CHUNKS: usize> TweakableHash for Blake3TweakHash<NUM_CHUNKS> {
         *hasher.finalize().as_bytes()
     }
 
+    // The explicit full-batch/tail branches keep the hot SIMD path readable.
+    #[allow(clippy::option_if_let_else)]
     fn compute_tree_leaves<PRF>(
         prf_key: &PRF::Key,
         parameter: &Self::Parameter,
@@ -128,23 +133,68 @@ impl<const NUM_CHUNKS: usize> TweakableHash for Blake3TweakHash<NUM_CHUNKS> {
         assert_eq!(num_chains, NUM_CHUNKS);
         assert!(chain_length >= 1);
         epochs
-            .par_iter()
-            .map(|epoch| {
-                let mut hasher =
-                    initialized_tree_hasher(&TREE_LEAF_HASHER, parameter, 0, *epoch, num_chains);
-                for chain_index in 0..num_chains {
-                    let start = PRF::get_domain_element(prf_key, *epoch, chain_index as u64).into();
-                    let chain_end = chain::<Self>(
-                        parameter,
-                        *epoch,
-                        chain_index as u8,
-                        0,
-                        chain_length - 1,
-                        &start,
-                    );
-                    hasher.update(&chain_end);
+            .par_chunks(SIMD_LANES)
+            .flat_map_iter(|epoch_batch| {
+                if let Ok(batch_epochs) = <[u32; SIMD_LANES]>::try_from(epoch_batch) {
+                    let mut hashers: [blake3::Hasher; SIMD_LANES] = core::array::from_fn(|lane| {
+                        initialized_tree_hasher(
+                            &TREE_LEAF_HASHER,
+                            parameter,
+                            0,
+                            batch_epochs[lane],
+                            num_chains,
+                        )
+                    });
+                    for chain_index in 0..num_chains {
+                        let starts =
+                            PRF::get_domain_elements_4(prf_key, batch_epochs, chain_index as u64)
+                                .map(Into::into);
+                        let chain_ends = chain_4(
+                            &CHAIN_CONTEXT_KEY,
+                            parameter,
+                            batch_epochs,
+                            chain_index as u8,
+                            0,
+                            chain_length - 1,
+                            starts,
+                        );
+                        for lane in 0..SIMD_LANES {
+                            hashers[lane].update(&chain_ends[lane]);
+                        }
+                    }
+                    hashers
+                        .map(|hasher| *hasher.finalize().as_bytes())
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                } else {
+                    epoch_batch
+                        .iter()
+                        .map(|epoch| {
+                            let mut hasher = initialized_tree_hasher(
+                                &TREE_LEAF_HASHER,
+                                parameter,
+                                0,
+                                *epoch,
+                                num_chains,
+                            );
+                            for chain_index in 0..num_chains {
+                                let start =
+                                    PRF::get_domain_element(prf_key, *epoch, chain_index as u64)
+                                        .into();
+                                let chain_end = chain::<Self>(
+                                    parameter,
+                                    *epoch,
+                                    chain_index as u8,
+                                    0,
+                                    chain_length - 1,
+                                    &start,
+                                );
+                                hasher.update(&chain_end);
+                            }
+                            *hasher.finalize().as_bytes()
+                        })
+                        .collect()
                 }
-                *hasher.finalize().as_bytes()
             })
             .collect()
     }
@@ -187,6 +237,41 @@ mod tests {
         assert_ne!(chain, leaf);
         assert_ne!(chain, node);
         assert_ne!(leaf, node);
+    }
+
+    #[test]
+    fn simd_chain_matches_scalar() {
+        let parameter = [11u8; HASH_LENGTH];
+        let epochs = [0, 1, 123_456, u32::MAX];
+        let starts: [[u8; HASH_LENGTH]; SIMD_LANES] =
+            core::array::from_fn(|lane| core::array::from_fn(|i| (lane * 37 + i) as u8));
+
+        for chain_index in [0, 17, u8::MAX] {
+            for start_position in [0, 3, 127] {
+                for steps in [1, 2, 7] {
+                    let batched = chain_4(
+                        &CHAIN_CONTEXT_KEY,
+                        &parameter,
+                        epochs,
+                        chain_index,
+                        start_position,
+                        steps,
+                        starts,
+                    );
+                    for lane in 0..SIMD_LANES {
+                        let scalar = chain::<Hash>(
+                            &parameter,
+                            epochs[lane],
+                            chain_index,
+                            start_position,
+                            steps,
+                            &starts[lane],
+                        );
+                        assert_eq!(batched[lane], scalar);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

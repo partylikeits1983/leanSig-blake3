@@ -1,7 +1,7 @@
 //! BLAKE3-based pseudorandom functions used by LeanSig.
 
 use super::Pseudorandom;
-use crate::{HASH_LENGTH, MESSAGE_LENGTH};
+use crate::{HASH_LENGTH, MESSAGE_LENGTH, symmetric::tweak_hash::blake3_simd::keyed_hash_4};
 
 const CHAIN_START_TAG: &[u8] = b"leansig-v1/prf-chain-start";
 const SIGNING_RANDOMNESS_TAG: &[u8] = b"leansig-v1/prf-signing-randomness";
@@ -25,6 +25,20 @@ impl Pseudorandom for Blake3Prf {
         hasher.update(&epoch.to_le_bytes());
         hasher.update(&index.to_le_bytes());
         *hasher.finalize().as_bytes()
+    }
+
+    fn get_domain_elements_4(key: &Self::Key, epochs: [u32; 4], index: u64) -> [Self::Domain; 4] {
+        const INPUT_LEN: usize = CHAIN_START_TAG.len() + size_of::<u32>() + size_of::<u64>();
+        let inputs: [[u8; INPUT_LEN]; 4] = core::array::from_fn(|lane| {
+            let mut input = [0; INPUT_LEN];
+            let epoch_start = CHAIN_START_TAG.len();
+            let index_start = epoch_start + size_of::<u32>();
+            input[..epoch_start].copy_from_slice(CHAIN_START_TAG);
+            input[epoch_start..index_start].copy_from_slice(&epochs[lane].to_le_bytes());
+            input[index_start..].copy_from_slice(&index.to_le_bytes());
+            input
+        });
+        keyed_hash_4(key, &inputs)
     }
 
     fn get_randomness(
@@ -73,5 +87,17 @@ mod tests {
         assert_eq!(rho, Blake3Prf::get_randomness(&key, 3, &message, 4));
         assert_ne!(rho, Blake3Prf::get_randomness(&key, 3, &message, 5));
         assert_ne!(chain, rho);
+    }
+
+    #[test]
+    fn batched_domains_match_scalar() {
+        let key = [17u8; HASH_LENGTH];
+        let epochs = [0, 1, 123_456, u32::MAX];
+
+        for index in [0, 1, u64::from(u32::MAX), u64::MAX] {
+            let batched = Blake3Prf::get_domain_elements_4(&key, epochs, index);
+            let scalar = epochs.map(|epoch| Blake3Prf::get_domain_element(&key, epoch, index));
+            assert_eq!(batched, scalar);
+        }
     }
 }
